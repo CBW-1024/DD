@@ -1,112 +1,90 @@
-//
-//  WCRBundleIDAlignWCP.xm —— 对齐 WCP（WCPulse）的伪装逻辑（objectForInfoDictionaryKey:）
-//  ---------------------------------------------------------------------------
-//  严格对齐 WCPulse.dylib 的 bundleId 伪装机制：
-//    WCP hook 的是 NSBundle -objectForInfoDictionaryKey:（IMP @0x593258），
-//    通过 XOR 混淆解码出 CFBundleIdentifier key 与伪装值 com.tencent.xin
-//    （源缓冲 0xb61000+0x940 key / 0xb61000+0x8fa 值），对指定 key 返回伪装值。
-//
-//  本版本只 hook objectForInfoDictionaryKey:（对齐 WCP，不 hook bundleIdentifier），
-//  当外部读取 Info.plist 的 CFBundleIdentifier 键时返回官方包名 com.tencent.xin。
-//
-//  用途：验证"走 objectForInfoDictionaryKey: 伪装"这条路径对登录 / 无线数据弹窗 /
-//        UI 布局的影响，与 self==mainBundle / 调用栈过滤两条路径作对照。
-//
-//  调试日志：默认开启，写入 <沙盒>/Documents/bundleid_wcp.log，同时 NSLog。
-//  ---------------------------------------------------------------------------
-
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
-#import <stdarg.h>
+#import <dlfcn.h>
 
-// 伪装目标值（对齐 WCP：官方正式包）
+// 微信官方 Bundle ID（用于伪装）
 static NSString *const kOfficialBundleID = @"com.tencent.xin";
 
 
-// ===========================================================================
-//  调试日志（默认开启）
-// ===========================================================================
-#ifdef WCR_ENABLE_LOG
+#pragma mark - NSBundle Hook：篡改 bundleIdentifier
 
-static NSFileHandle *gLogFH = nil;
-static BOOL gLogInited = NO;
-
-static void WCRLogInit(void) {
-    if (gLogInited) return;
-    @autoreleasepool {
-        NSString *dir = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"];
-        [[NSFileManager defaultManager] createDirectoryAtPath:dir
-                                  withIntermediateDirectories:YES
-                                                   attributes:nil
-                                                        error:NULL];
-        NSString *path = [dir stringByAppendingPathComponent:@"bundleid_wcp.log"];
-        if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
-            [[NSFileManager defaultManager] createFileAtPath:path contents:nil attributes:nil];
-        }
-        gLogFH = [NSFileHandle fileHandleForWritingAtPath:path];
-        [gLogFH seekToEndOfFile];
-        NSLog(@"[WCRBundleIDAlignWCP] 日志文件: %@ (handle=%@)", path, gLogFH);
-    }
-    gLogInited = YES;
-}
-
-static void WCRLog(NSString *fmt, ...) {
-    @autoreleasepool {
-        WCRLogInit();
-        va_list args2;
-        va_start(args2, fmt);
-        NSString *nslogMsg = [[NSString alloc] initWithFormat:fmt arguments:args2];
-        va_end(args2);
-        NSLog(@"[WCRBundleIDAlignWCP] %@", nslogMsg);
-
-        if (gLogFH == nil) return;
-        va_list args;
-        va_start(args, fmt);
-        NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:args];
-        va_end(args);
-        NSDateFormatter *df = [[NSDateFormatter alloc] init];
-        [df setDateFormat:@"yyyy-MM-dd HH:mm:ss.SSS"];
-        NSString *line = [NSString stringWithFormat:@"[%@] %@\n",
-                          [df stringFromDate:[NSDate date]], msg];
-        NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
-        @synchronized (gLogFH) {
-            [gLogFH writeData:data];
-            [gLogFH synchronizeFile];
-        }
-    }
-}
-
-#else
-#define WCRLogInit() do {} while (0)
-#define WCRLog(...)  do {} while (0)
-#endif
-
-
-// ===========================================================================
-//  对齐 WCP：hook objectForInfoDictionaryKey:，对 CFBundleIdentifier 伪装
-// ===========================================================================
 %hook NSBundle
 
-- (id)objectForInfoDictionaryKey:(NSString *)key {
-    id origVal = %orig;
-    // 对齐 WCP：当读取 Info.plist 的 CFBundleIdentifier 键时，伪装为官方包名
-    if ([key isEqualToString:@"CFBundleIdentifier"]) {
-        WCRLog(@"[objectForInfoDictionaryKey:] key=CFBundleIdentifier → 伪装, orig=%@ ret=%@",
-               origVal, kOfficialBundleID);
-        return kOfficialBundleID;
+/**
+ * 篡改主程序的 bundleIdentifier，仅在主程序自身代码读取时伪装成微信官方包名，
+ * 以绕过某些基于 bundle ID 的检测（如越狱检测、环境校验）。
+ * 对系统框架、第三方动态库等外部调用保持原样，避免副作用。
+ */
+- (NSString *)bundleIdentifier {
+    // 先获取原始 bundleIdentifier（系统真实值）
+    NSString *origVal = %orig;
+
+    // ① 非主 Bundle（如系统库、插件等）直接放行，只干预主程序自身。
+    if (self != [NSBundle mainBundle]) {
+        return origVal;
     }
-    WCRLog(@"[objectForInfoDictionaryKey:] key=%@ → 不伪装, ret=%@", key, origVal);
-    return origVal;
+
+    // ② 如果原始值已经是目标官方包名，直接返回，避免后续栈回溯开销。
+    if ([origVal isEqualToString:kOfficialBundleID]) {
+        return origVal;
+    }
+
+    // ③ 获取当前调用栈地址，用于判断调用者是否来自主程序内部。
+    NSArray *stack = [NSThread callStackReturnAddresses];
+    NSUInteger depth = stack.count;
+    // 栈深度不足 3 则无法获取有效调用帧，直接放行。
+    if (depth < 3) {
+        return origVal;
+    }
+
+    // 取第 3 帧（索引 2）的地址，通常是调用本方法的直接调用者。
+    unsigned long long frameAddr =
+        [[stack objectAtIndexedSubscript:2] unsignedLongValue];
+
+    // ④ 通过 dladdr 获取该地址对应的符号信息，包括所属镜像路径。
+    Dl_info info;
+    memset(&info, 0, sizeof(info));
+    if (dladdr((const void *)(uintptr_t)frameAddr, &info) == 0) {
+        // 若解析失败，无法判断调用来源，安全起见放行。
+        return origVal;
+    }
+
+    // ⑤ 获取调用者所在二进制文件的路径。
+    NSString *frameName = [NSString stringWithUTF8String:info.dli_fname ?: ""];
+    // 主程序 Bundle 路径（如 /var/containers/Bundle/Application/xxx/WeChat.app）
+    NSString *mainPath = [[NSBundle mainBundle] bundlePath];
+
+    // 判断调用者是否位于主程序包内（包括主可执行文件及内嵌 Framework）。
+    BOOL fromMain = (mainPath.length > 0 && [frameName hasPrefix:mainPath]);
+
+    // ⑥ 只有主程序自身的代码调用时才返回伪装包名，其他所有外部调用保留真实值。
+    return fromMain ? kOfficialBundleID : origVal;
 }
 
 %end
 
 
+#pragma mark - FaceRecogFlashHandler Hook：确保人脸流水线正常初始化
+
+%hook FaceRecogFlashHandler
+
+/**
+ * 钩住人脸识别处理器的初始化方法，仅透传调用原实现。
+ * 目的是让该方法被正常执行，防止某些检测机制因方法未被调用而判定环境异常。
+ * （例如部分越狱检测会 hook 该方法返回空，导致人脸识别功能失效，此处确保其正常运行）
+ */
+- (void)initPipeline {
+    %orig;  // 直接调用原始方法，不做任何修改
+}
+
+%end
+
+
+#pragma mark - 构造函数：初始化所有 Hook
+
 %ctor {
     @autoreleasepool {
-        WCRLogInit();
-        WCRLog(@"==== WCRBundleIDAlignWCP 注入完成 (对齐 WCP objectForInfoDictionaryKey:), 目标=%@ ====",
-               kOfficialBundleID);
+        // %init 会展开所有 %hook 并注册到 Objective-C 运行时
         %init;
     }
 }
