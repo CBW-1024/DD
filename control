@@ -1,0 +1,9 @@
+Package: com.dd.wcdd
+Name: WCPulseLite
+Version: 1.0.0
+Architecture: iphoneos-arm
+Description: 多开过人脸 + 多开内测资格（默认常开，无开关）
+Maintainer: DD
+Author: DD
+Section: Tweaks
+Depends: mobilesubstrate
