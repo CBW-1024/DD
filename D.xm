@@ -17,10 +17,10 @@
 //    - 登录资格：微信读 [NSBundle mainBundle].bundleIdentifier → 伪装 → 去资格
 //    - 无线数据检测：若其用非 mainBundle 实例 → 返回真实 qy.xin → 弹窗恢复
 //
-//  【调试日志】本版本日志默认开启（-DWCR_ENABLE_LOG=1），写入：
+//  【调试日志】本版本日志默认开启（-DWCR_ENABLE_LOG=1），写入沙盒 Documents：
 //    <沙盒>/Documents/bundleid_main.log
-//    每条记录 self 指针、是否 mainBundle、实例 bundlePath、调用栈来源镜像。
-//    用于定位无线数据检测到底用哪个 NSBundle 实例。
+//    同时输出到 NSLog（Console.app 可看）。每条记录 self 指针、是否 mainBundle、
+//    实例 bundlePath、调用栈来源镜像。用于定位无线数据检测到底用哪个 NSBundle 实例。
 //  ---------------------------------------------------------------------------
 
 #import <Foundation/Foundation.h>
@@ -43,6 +43,7 @@ static BOOL gLogInited = NO;
 static void WCRLogInit(void) {
     if (gLogInited) return;
     @autoreleasepool {
+        // 日志写沙盒 Documents（用户指定），同时 NSLog 兜底
         NSString *dir = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"];
         [[NSFileManager defaultManager] createDirectoryAtPath:dir
                                   withIntermediateDirectories:YES
@@ -54,6 +55,7 @@ static void WCRLogInit(void) {
         }
         gLogFH = [NSFileHandle fileHandleForWritingAtPath:path];
         [gLogFH seekToEndOfFile];
+        NSLog(@"[WCRBundleIDAlignMainBundle] 日志文件: %@ (handle=%@)", path, gLogFH);
     }
     gLogInited = YES;
 }
@@ -61,6 +63,13 @@ static void WCRLogInit(void) {
 static void WCRLog(NSString *fmt, ...) {
     @autoreleasepool {
         WCRLogInit();
+        // 同时输出到系统日志（Console.app / idevice 日志可看）
+        va_list args2;
+        va_start(args2, fmt);
+        NSString *nslogMsg = [[NSString alloc] initWithFormat:fmt arguments:args2];
+        va_end(args2);
+        NSLog(@"[WCRBundleIDAlignMainBundle] %@", nslogMsg);
+
         if (gLogFH == nil) return;
         va_list args;
         va_start(args, fmt);
