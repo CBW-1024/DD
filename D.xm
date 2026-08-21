@@ -7,6 +7,7 @@
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
 #import <WebKit/WebKit.h>
+#import <dispatch/dispatch.h>
 #import <objc/runtime.h>
 
 // ========== 插件管理入口 ==========
@@ -519,15 +520,21 @@ static NSString *DDAdBlockMiniAppInjectJS(void) {
 }
 %end
 
-// ========== 7. 激励广告快速过（Hook: WCFinderRewardAdViewController） ==========
+// ========== 7. 激励广告快速过（对齐 WCR：adHasPlayOver 跳过 + 进入即收起） ==========
 %hook WCFinderRewardAdViewController
+// 让系统认为激励视频已播放完毕，跳过倒计时/等待并触发奖励结算（WCR 同款核心）
+- (BOOL)adHasPlayOver {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].rewardedFastPass) return YES;
+    return %orig;
+}
+// 兜底：进入广告页后立刻收起；延迟到下一轮 runloop，避免在转场动画未完成时 dismiss 失效
 - (void)viewDidAppear:(BOOL)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].rewardedFastPass) {
-        // self 为前向声明类，强转为 id 以避免前向声明报错
-        [(id)self dismissViewControllerAnimated:YES completion:nil];
-        return;
-    }
     %orig;
+    if (ddActive() && [DDAdBlockConfig sharedConfig].rewardedFastPass) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [(id)self dismissViewControllerAnimated:YES completion:nil];
+        });
+    }
 }
 %end
 
@@ -607,30 +614,35 @@ static NSString *DDAdBlockMiniAppInjectJS(void) {
 
     Class sectionCls = %c(WCTableViewSectionManager);
     Class cellCls = %c(WCTableViewCellManager);
-
-    WCTableViewSectionManager *secMain = [sectionCls sectionWithHeader:@"广告拦截开关"];
     DDAdBlockConfig *cfg = [DDAdBlockConfig sharedConfig];
 
-    [secMain addCell:[cellCls switchCellForSel:@selector(onMasterSwitch:)        target:self title:@"启用广告拦截"       on:cfg.master]];
-    [secMain addCell:[cellCls switchCellForSel:@selector(onMomentsSwitch:)      target:self title:@"屏蔽朋友圈广告"     on:cfg.moments]];
-    [secMain addCell:[cellCls switchCellForSel:@selector(onBrandSwitch:)        target:self title:@"屏蔽公众号广告"     on:cfg.brand]];
-    [secMain addCell:[cellCls switchCellForSel:@selector(onFinderSwitch:)       target:self title:@"屏蔽视频号广告"     on:cfg.finder]];
-    [secMain addCell:[cellCls switchCellForSel:@selector(onLiveSwitch:)         target:self title:@"屏蔽直播广告"       on:cfg.live]];
-    [secMain addCell:[cellCls switchCellForSel:@selector(onMiniProgramSwitch:)   target:self title:@"屏蔽小程序广告"     on:cfg.miniProgram]];
+    // 总开关：最上方独立单元格
+    WCTableViewSectionManager *secMaster = [sectionCls sectionWithHeader:@"DD广告拦截"];
+    [secMaster addCell:[cellCls switchCellForSel:@selector(onMasterSwitch:) target:self title:@"启用广告拦截" on:cfg.master]];
+    [_tableViewManager addSection:secMaster];
 
-    [_tableViewManager addSection:secMain];
+    // 总开关开启时展开各分区开关，关闭时收起
+    if (cfg.master) {
+        WCTableViewSectionManager *secMain = [sectionCls sectionWithHeader:@"广告拦截"];
+        [secMain addCell:[cellCls switchCellForSel:@selector(onMomentsSwitch:)      target:self title:@"屏蔽朋友圈广告"   on:cfg.moments]];
+        [secMain addCell:[cellCls switchCellForSel:@selector(onBrandSwitch:)        target:self title:@"屏蔽公众号广告"   on:cfg.brand]];
+        [secMain addCell:[cellCls switchCellForSel:@selector(onFinderSwitch:)       target:self title:@"屏蔽视频号广告"   on:cfg.finder]];
+        [secMain addCell:[cellCls switchCellForSel:@selector(onLiveSwitch:)          target:self title:@"屏蔽直播广告"     on:cfg.live]];
+        [secMain addCell:[cellCls switchCellForSel:@selector(onMiniProgramSwitch:)   target:self title:@"屏蔽小程序广告"   on:cfg.miniProgram]];
+        [_tableViewManager addSection:secMain];
 
-    WCTableViewSectionManager *secAdv = [sectionCls sectionWithHeader:@"进阶拦截"];
-    [secAdv addCell:[cellCls switchCellForSel:@selector(onNetworkSwitch:)       target:self title:@"网络层广告拦截"     on:cfg.network]];
-    [secAdv addCell:[cellCls switchCellForSel:@selector(onSearchSwitch:)        target:self title:@"屏蔽搜索广告"       on:cfg.search]];
-    [secAdv addCell:[cellCls switchCellForSel:@selector(onRewardedSwitch:)      target:self title:@"激励广告快速跳过"   on:cfg.rewardedFastPass]];
-    [secAdv addCell:[cellCls switchCellForSel:@selector(onTeenagerSwitch:)      target:self title:@"关闭青少年模式弹窗" on:cfg.teenagerPopup]];
+        WCTableViewSectionManager *secAdv = [sectionCls sectionWithHeader:@"进阶拦截"];
+        [secAdv addCell:[cellCls switchCellForSel:@selector(onNetworkSwitch:)     target:self title:@"网络层广告拦截"     on:cfg.network]];
+        [secAdv addCell:[cellCls switchCellForSel:@selector(onSearchSwitch:)      target:self title:@"屏蔽搜索广告"       on:cfg.search]];
+        [secAdv addCell:[cellCls switchCellForSel:@selector(onRewardedSwitch:)    target:self title:@"激励广告快速跳过"   on:cfg.rewardedFastPass]];
+        [secAdv addCell:[cellCls switchCellForSel:@selector(onTeenagerSwitch:)    target:self title:@"关闭青少年模式弹窗" on:cfg.teenagerPopup]];
+        [_tableViewManager addSection:secAdv];
+    }
 
-    [_tableViewManager addSection:secAdv];
     [_tableViewManager reloadTableView];
 }
 
-- (void)onMasterSwitch:(UISwitch *)s        { [DDAdBlockConfig sharedConfig].master = s.isOn; }
+- (void)onMasterSwitch:(UISwitch *)s        { [DDAdBlockConfig sharedConfig].master = s.isOn; [self buildTable]; }
 - (void)onMomentsSwitch:(UISwitch *)s       { [DDAdBlockConfig sharedConfig].moments = s.isOn; }
 - (void)onBrandSwitch:(UISwitch *)s         { [DDAdBlockConfig sharedConfig].brand = s.isOn; }
 - (void)onFinderSwitch:(UISwitch *)s        { [DDAdBlockConfig sharedConfig].finder = s.isOn; }
