@@ -540,8 +540,9 @@ static BOOL DDAdBlockURLIsAdRequest(NSURL *url) {
 }
 - (id)dataTaskWithURL:(NSURL *)arg1 completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))arg2 {
     if (ddActive() && [DDAdBlockConfig sharedConfig].network && DDAdBlockURLIsAdRequest(arg1)) {
-        NSURLRequest *dr = [NSURLRequest requestWithURL:[NSURL URLWithString:@"data:text/plain;charset=utf-8,"]];
-        return %orig(dr, arg2);
+        // 本方法第一个参数是 NSURL *，需替换为空 data: URL（非 NSURLRequest *）
+        NSURL *du = [NSURL URLWithString:@"data:text/plain;charset=utf-8,"];
+        return %orig(du, arg2);
     }
     return %orig;
 }
