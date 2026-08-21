@@ -1,19 +1,7 @@
 //
 //  DDAdBlock.xm
-//  插件名: DD广告拦截   版本: 1.0.0
-//  功能:   从 WCRefine 的 EnhancedAdBlock 模块提取广告拦截能力，重建为独立单文件 tweak。
-//  开关对齐 WCRefineEnhancedAdBlock* 的 10 个 UI 开关（总/朋友圈/公众号/视频号/直播/
-//           小程序/网络层/搜索/激励快过/青少年弹窗），入口与设置界面参考 WechatNoAds。
-//
-//  说明:
-//   - 入口与设置界面参考 WechatNoAds（WCPluginsMgr 注册 + 原生 WCTableViewManager）；
-//   - 所有去广告的“核心类与方法”均对齐 WCRefine：通过在 WCRefine.dylib 字符串集与
-//     5.1 万份微信头文件交叉核对，只 Hook WCR 实际引用的微信去广告方法（数据层
-//     WCAdvertiseDataHelper / 解析层 BrandAdDataParser / 展示层 WCFinderAdCountdownBannerView /
-//     推送层 MagicAdPushMgrService·WCAdvertisePushService / 上报层 WCAdvertiseStatMgr / 弹窗
-//     WCFinderTimelineTabViewController 等），不引入任何猜测类；
-//   - 10 个开关【默认全部关闭】，需在设置内手动开启；每个方法经总开关 + 分区开关双重门控；
-//   - 所有 %hook 类若不存在（微信版本差异）则 Logos 自动跳过，不影响其余功能。
+//  DD广告拦截 v1.0.0 — 微信广告拦截插件（单文件 Logos/Theos tweak）
+//  10 个开关，默认全部关闭；每个 Hook 经总开关 + 分区开关双重门控。
 //
 
 #import <UIKit/UIKit.h>
@@ -21,13 +9,13 @@
 #import <WebKit/WebKit.h>
 #import <objc/runtime.h>
 
-// ========== 插件管理入口（参考 WechatNoAds） ==========
+// ========== 插件管理入口 ==========
 @interface WCPluginsMgr : NSObject
 + (instancetype)sharedInstance;
 - (void)registerControllerWithTitle:(NSString *)title version:(NSString *)version controller:(NSString *)controller;
 @end
 
-// ========== 配置类（对齐 WCRefineEnhancedAdBlock* 的 10 个开关） ==========
+// ========== 配置（10 个开关，默认全关） ==========
 static NSString * const kDDAdBlockMasterKey            = @"DDAdBlock_Master";
 static NSString * const kDDAdBlockMomentsKey           = @"DDAdBlock_Moments";
 static NSString * const kDDAdBlockBrandKey             = @"DDAdBlock_Brand";
@@ -41,16 +29,16 @@ static NSString * const kDDAdBlockTeenagerPopupKey     = @"DDAdBlock_TeenagerPop
 
 @interface DDAdBlockConfig : NSObject
 + (instancetype)sharedConfig;
-@property (assign, nonatomic) BOOL master;            // 总开关（对应 EnhancedAdBlockEnabled）
-@property (assign, nonatomic) BOOL moments;           // 朋友圈（EnhancedAdBlockMomentsEnabled）
-@property (assign, nonatomic) BOOL brand;             // 公众号（EnhancedAdBlockBrandEnabled）
-@property (assign, nonatomic) BOOL finder;            // 视频号（EnhancedAdBlockFinderEnabled）
-@property (assign, nonatomic) BOOL live;              // 直播（EnhancedAdBlockLiveEnabled）
-@property (assign, nonatomic) BOOL miniProgram;       // 小程序（EnhancedAdBlockMiniProgramEnabled）
-@property (assign, nonatomic) BOOL network;           // 网络层（EnhancedAdBlockNetworkEnabled）
-@property (assign, nonatomic) BOOL search;            // 搜索（EnhancedAdBlockSearchEnabled）
-@property (assign, nonatomic) BOOL rewardedFastPass;  // 激励广告快速过（EnhancedAdBlockRewardedAdFastPassEnabled）
-@property (assign, nonatomic) BOOL teenagerPopup;     // 青少年弹窗（EnhancedAdBlockTeenagerPopupDisabled）
+@property (assign, nonatomic) BOOL master;            // 总开关
+@property (assign, nonatomic) BOOL moments;           // 朋友圈
+@property (assign, nonatomic) BOOL brand;             // 公众号
+@property (assign, nonatomic) BOOL finder;            // 视频号
+@property (assign, nonatomic) BOOL live;              // 直播
+@property (assign, nonatomic) BOOL miniProgram;       // 小程序
+@property (assign, nonatomic) BOOL network;           // 网络层
+@property (assign, nonatomic) BOOL search;            // 搜索
+@property (assign, nonatomic) BOOL rewardedFastPass;  // 激励广告快速过
+@property (assign, nonatomic) BOOL teenagerPopup;     // 青少年弹窗
 @end
 
 @implementation DDAdBlockConfig
@@ -63,7 +51,7 @@ static NSString * const kDDAdBlockTeenagerPopupKey     = @"DDAdBlock_TeenagerPop
 - (instancetype)init {
     if (self = [super init]) {
         NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-        // 全部默认关闭（开关需在设置内手动开启）
+        // 默认全部关闭，需在设置内手动开启
         if ([ud objectForKey:kDDAdBlockMasterKey]           == nil) [ud setBool:NO forKey:kDDAdBlockMasterKey];
         if ([ud objectForKey:kDDAdBlockMomentsKey]          == nil) [ud setBool:NO forKey:kDDAdBlockMomentsKey];
         if ([ud objectForKey:kDDAdBlockBrandKey]            == nil) [ud setBool:NO forKey:kDDAdBlockBrandKey];
@@ -143,14 +131,7 @@ static NSString * const kDDAdBlockTeenagerPopupKey     = @"DDAdBlock_TeenagerPop
 // 总开关守卫：所有 Hook 先经过它
 static BOOL ddActive(void) { return [DDAdBlockConfig sharedConfig].master; }
 
-// ============================================================================
-//  以下所有 Hook 的微信类与方法，均来自对 WCRefine.dylib 字符串集与 5.1 万份
-//  微信头文件的交叉核对：只 Hook WCR 实际引用的微信“去广告”方法（数据层 / 解析层 /
-//  展示层 / 推送层 / 上报层 / 弹窗），不引入任何猜测类。
-//  每个方法都先经过 ddActive()(总开关) 与对应分区开关双重门控；分区开关默认全关。
-// ============================================================================
-
-// ---------- 1. 朋友圈广告（对齐 WCR: WCAdvertiseDataHelper 数据层 + WCTimelineMgr 实时插入） ----------
+// ========== 1. 朋友圈广告（Hook: WCAdvertiseDataHelper + WCTimelineMgr） ==========
 %hook WCAdvertiseDataHelper
 - (void)saveAdPullCompareInfo:(id)arg1 {
     if (ddActive() && [DDAdBlockConfig sharedConfig].moments) return;
@@ -201,7 +182,7 @@ static BOOL ddActive(void) { return [DDAdBlockConfig sharedConfig].master; }
 }
 %end
 
-// ---------- 2. 公众号广告（对齐 WCR: BrandTLExptConfig + BrandTLCanvasCardMgr + BrandAdDataParser） ----------
+// ========== 2. 公众号广告（Hook: BrandTL* + BrandAdDataParser） ==========
 %hook BrandTLExptConfig
 - (BOOL)isExptNotShowAd {
     if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return YES;
@@ -224,7 +205,7 @@ static BOOL ddActive(void) { return [DDAdBlockConfig sharedConfig].master; }
 }
 %end
 
-// 公众号广告解析层：把广告内容/消息解析成广告对象的入口，直接返回 nil 即不生成广告。
+// 广告内容解析层：返回 nil 即不生成广告
 %hook BrandAdDataParser
 + (id)adDataItemForContent:(id)arg1 {
     if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return nil;
@@ -244,8 +225,8 @@ static BOOL ddActive(void) { return [DDAdBlockConfig sharedConfig].master; }
 }
 %end
 
-// ---------- 2.x 公众号/小程序 的 WebView 广告（对齐 WCR: 引用 MMWebViewController / WAWebViewController） ----------
-// 2.a 广告容器 CSS 隐藏规则（选择器来自实机 DOM 探针）
+// ========== 2.x 公众号/小程序 WebView 广告 ==========
+// 公众号文章内广告为 WebView 动态插入的 iframe，从网络 + DOM 两层拦截。
 static NSString *DDAdBlockMPHideCSS(void) {
     return @".iframe_ad_container,.iframe_adv_ad_container,"
             ".comment-ad-container,"
@@ -279,7 +260,7 @@ static NSString *DDAdBlockInjectJS(void) {
         DDAdBlockMPHideCSS(), DDAdBlockMPHideParentCSS()];
 }
 
-// 2.b 网络层广告 URL 黑名单（对应 WCR 的 ShouldBlockAdWebEvent / ShouldRedirectURLString）
+// 广告 URL 黑名单：命中即拒
 static NSArray<NSString *> *DDAdBlockURLBlocklist(void) {
     static NSArray *list;
     static dispatch_once_t once;
@@ -344,7 +325,7 @@ static BOOL ddURLIsAd(NSString *url) {
 }
 %end
 
-// ---------- 3. 视频号广告（对齐 WCR: WCFinderComment + WCFinderDataItem + WCAdFinderInfo） ----------
+// ========== 3. 视频号广告（Hook: WCFinderComment + WCFinderDataItem + WCAdFinderInfo） ==========
 %hook WCFinderComment
 - (id)advertisementInfo {
     if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return nil;
@@ -374,7 +355,7 @@ static BOOL ddURLIsAd(NSString *url) {
 }
 %end
 
-// ---------- 4. 小程序广告（对齐 WCR: WAAppTaskSplashADConfig + WA*SplashAd + adOperateWXData + MagicAd* + PushService） ----------
+// ========== 4. 小程序广告（Hook: WAAppTask* + MagicAd* + PushService） ==========
 %hook WAAppTaskSplashADConfig
 - (void)handleShowSplashAdCalled:(BOOL)arg1 {
     if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
@@ -403,7 +384,7 @@ static BOOL ddURLIsAd(NSString *url) {
 }
 %end
 
-// 小程序 MagicAd 自有广告位（按 posId 拉取，覆盖小程序位、支付完成页等）
+// MagicAd 自有广告位（按 posId 拉取，覆盖小程序位、支付完成页等）
 %hook MagicAdCommonService
 - (id)getAdInfoWithPosId:(id)arg1 {
     if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return nil;
@@ -438,7 +419,7 @@ static BOOL ddURLIsAd(NSString *url) {
 }
 %end
 
-// 小程序广告推送（WCR 实际引用的推送处理入口，直接丢弃广告消息）
+// 广告推送处理入口：直接丢弃广告消息
 %hook MagicAdPushMgrService
 - (void)handleAdMsg:(id)arg1 {
     if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
@@ -453,7 +434,7 @@ static BOOL ddURLIsAd(NSString *url) {
 }
 %end
 
-// 小程序广告组件（wx-ad / wx-ad-custom，直接出现在 DOM，需注入样式表隐藏）
+// 小程序广告 DOM 组件（wx-ad / wx-ad-custom，样式隐藏）
 static NSString *DDAdBlockMiniAppHideCSS(void) {
     return @"wx-ad,wx-ad-custom,ad,ad-custom,"
             ".wx-ad,.wx-ad-custom"
@@ -499,7 +480,7 @@ static NSString *DDAdBlockMiniAppInjectJS(void) {
 }
 %end
 
-// ---------- 5. 直播广告（对齐 WCR: WCFinderLiveHomePageViewController + WCFinderAdCountdownBannerView） ----------
+// ========== 5. 直播广告（Hook: WCFinderLiveHomePageViewController + WCFinderAdCountdownBannerView） ==========
 %hook WCFinderAdCountdownBannerView
 - (void)setupSubviews {
     if (ddActive() && [DDAdBlockConfig sharedConfig].live) return;
@@ -526,7 +507,7 @@ static NSString *DDAdBlockMiniAppInjectJS(void) {
 }
 %end
 
-// ---------- 6. 搜索广告（对齐 WCR: WCAdSearchH5Info） ----------
+// ========== 6. 搜索广告（Hook: WCAdSearchH5Info） ==========
 %hook WCAdSearchH5Info
 - (BOOL)isValid {
     if (ddActive() && [DDAdBlockConfig sharedConfig].search) return NO;
@@ -538,11 +519,11 @@ static NSString *DDAdBlockMiniAppInjectJS(void) {
 }
 %end
 
-// ---------- 7. 激励广告快速过（对齐 WCR: WCFinderRewardAdViewController） ----------
+// ========== 7. 激励广告快速过（Hook: WCFinderRewardAdViewController） ==========
 %hook WCFinderRewardAdViewController
 - (void)viewDidAppear:(BOOL)arg1 {
     if (ddActive() && [DDAdBlockConfig sharedConfig].rewardedFastPass) {
-        // self 在此为前向声明的 WCFinderRewardAdViewController，强转为 id 调用 dismiss 避免前向声明报错
+        // self 为前向声明类，强转为 id 以避免前向声明报错
         [(id)self dismissViewControllerAnimated:YES completion:nil];
         return;
     }
@@ -550,7 +531,7 @@ static NSString *DDAdBlockMiniAppInjectJS(void) {
 }
 %end
 
-// ---------- 8. 青少年模式弹窗（对齐 WCR: WCFinderTimelineTabViewController） ----------
+// ========== 8. 青少年模式弹窗（Hook: WCFinderTimelineTabViewController） ==========
 %hook WCFinderTimelineTabViewController
 - (void)showTeenagerBlockAlertView {
     if (ddActive() && [DDAdBlockConfig sharedConfig].teenagerPopup) return;
@@ -566,8 +547,7 @@ static NSString *DDAdBlockMiniAppInjectJS(void) {
 }
 %end
 
-// ---------- 9. 广告曝光上报抑制（对齐 WCR: WCAdvertiseStatMgr，归在总开关下） ----------
-// WCR 引用了广告统计上报类；关闭上报既不泄露浏览行为，也避免广告被“计入展示”。
+// ========== 9. 广告曝光上报抑制（Hook: WCAdvertiseStatMgr，归总开关） ==========
 %hook WCAdvertiseStatMgr
 - (id)getAdvertiseInfoForItem:(id)arg1 {
     if (ddActive()) return nil;
@@ -583,7 +563,7 @@ static NSString *DDAdBlockMiniAppInjectJS(void) {
 - (void)reportAllFeedsADLog { if (ddActive()) return; %orig; }
 %end
 
-// ========== 设置界面（参考 WechatNoAds） ==========
+// ========== 设置界面 ==========
 @interface WCTableViewManager : NSObject
 - (id)initWithFrame:(CGRect)frame style:(NSInteger)style;
 @property (nonatomic, readonly) UITableView *tableView;
@@ -663,7 +643,7 @@ static NSString *DDAdBlockMiniAppInjectJS(void) {
 
 @end
 
-// ========== 插件注册（参考 WechatNoAds） ==========
+// ========== 插件注册 ==========
 %ctor {
     @autoreleasepool {
         Class mgrClass = NSClassFromString(@"WCPluginsMgr");
