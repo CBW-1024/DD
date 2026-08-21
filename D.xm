@@ -1,8 +1,12 @@
 //
-//  DD广告拦截 v1.1.0 — 微信广告拦截插件（单文件 Logos/Theos tweak）
+//  DD广告拦截 v1.2.0 — 微信广告拦截插件（单文件 Logos/Theos tweak）
 //  11 个开关，默认全部关闭；每个 Hook 经总开关 + 分区开关双重门控。
 //  开关命名对齐 WCR（WCRefine）的 enhancedAdBlock*Enabled 模块：moments/brand/finder/live/
 //  miniProgram/network/search/rewardedAdFastPass/expt + 独立 disableTeenagerPopupEnabled。
+//  全部 Hook 落点经 WCR 的 __objc_selrefs 精确核对（v1.2.0）：
+//    - 小程序广告走“开屏 JS 事件 + 广告推送消息”双入口拦截（WCR 同款机制）
+//    - 激励广告走 adHasPlayOver + viewDidLoad（WCR 精确落点）
+//    - 公众号/WebView 广告补入 MBEventHandler_*/WebviewJSEventHandler JS 桥拦截
 //
 
 #import <UIKit/UIKit.h>
@@ -341,8 +345,60 @@ static BOOL ddActive(void) { return [DDAdBlockConfig sharedConfig].master; }
 }
 %end
 
-// ========== 2.x 公众号/小程序 WebView 广告 ==========
-// 公众号文章内广告为 WebView 动态插入的 iframe，从网络 + DOM 两层拦截。
+// ========== 2.x 公众号/WebView 广告的 JS 桥事件拦截（精确对齐 WCR）[WCR: enhancedAdBlockBrandEnabled] ==========
+// WCR 通过 __objc_selrefs 精确引用了这些 WebView JS 桥处理器（MBEventHandler_*/WebviewJSEventHandler），
+// 在 JS 桥层丢弃广告请求/数据注入：
+//   MBEventHandler_getAdPushMsg.invoke:           获取广告推送消息
+//   MBEventHandler_getOldAdInfo.invoke:           获取旧广告信息
+//   MBEventHandler_setAdRequestInfo.invoke:       设置广告请求信息
+//   MBEventHandler_setAdCardRequestInfo.invoke:   设置广告卡片请求信息
+//   MBEventHandler_setFeedsAdRequestInfo.invoke:  设置信息流广告请求信息
+//   WebviewJSEventHandler_getAdIdInfo.checkUrlValid:  广告ID获取的URL校验
+// 拦截这些 → 公众号文章/WebView 内广告的 JS 桥拿不到广告数据，广告不再注入。
+%hook MBEventHandler_getAdPushMsg
+- (void)invoke:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return;
+    %orig;
+}
+%end
+
+%hook MBEventHandler_getOldAdInfo
+- (void)invoke:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return;
+    %orig;
+}
+%end
+
+%hook MBEventHandler_setAdRequestInfo
+- (void)invoke:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return;
+    %orig;
+}
+%end
+
+%hook MBEventHandler_setAdCardRequestInfo
+- (void)invoke:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return;
+    %orig;
+}
+%end
+
+%hook MBEventHandler_setFeedsAdRequestInfo
+- (void)invoke:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return;
+    %orig;
+}
+%end
+
+%hook WebviewJSEventHandler_getAdIdInfo
+- (BOOL)checkUrlValid {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return NO;
+    return %orig;
+}
+%end
+
+// ========== 2.x 公众号 WebView 广告（DOM 层兜底） ==========
+// 公众号文章内广告为 WebView 动态插入的 iframe，从 DOM + CSS 两层隐藏（作为 JS 桥拦截的兜底）。
 static NSString *DDAdBlockMPHideCSS(void) {
     return @".iframe_ad_container,.iframe_adv_ad_container,"
             ".comment-ad-container,"
@@ -438,84 +494,108 @@ static NSString *DDAdBlockInjectJS(void) {
 }
 %end
 
-// ========== 4. 小程序广告（对齐 WCR：原生层开屏广告拦截）[WCR: enhancedAdBlockMiniProgramEnabled] ==========
-// 微信小程序广告以“开屏广告”为主。WCR 在原生层强制关闭，而非注入 WebView
+// ========== 4. 小程序广告（精确对齐 WCR 落点）[WCR: enhancedAdBlockMiniProgramEnabled] ==========
+// 微信小程序广告（开屏 + 横幅/插屏 + 广告推送消息）在原生层拦截，不注入 WebView
 // （注入会误伤正常请求、产生“网络连接失败”，且 display:none 不停音频/卡顿）。
-// 对齐点（来自 WCR 强制字符串 + 微信头文件）：
-//   WAAppTaskSplashADConfig.splashADEnableNumber -> 0
-//   WAAppTaskSplashADConfig.canShowSplashADWindow / splashADHasContent / canHotStartShowSplashAD -> NO
-//   WAAppTask.isSplashADFinished -> YES
-//   WASplashADWindow.showRootViewControllerAnimated:completion: 跳过展示
+//
+// 【关键】WCR 的小程序广告拦截落点已通过 __objc_selrefs 精确核对，全部集中在：
+//   1) 开屏广告“JS 事件层”：
+//      - WAJSEventHandler_showSplashAd.handleJSEvent:        （showSplashAd 事件，丢弃）
+//      - WAJSEventHandler_showSplashAdMenu.handleJSEvent:    （showSplashAdMenu 菜单事件，丢弃）
+//      - WAJSEventHandler_adOperateWXData.handleJSEvent: /
+//        endCancel / endOKWithData: / onResponseData:        （广告操作数据，清空）
+//      - WAAppTaskSplashADConfig.handleShowSplashAdCalled:   （开屏展示入口，空实现）
+//      - WASplashADWindow.initWithFrame:                     （开屏窗口，不初始化）
+//   2) 广告“推送消息层”：
+//      - MagicAdPushMgrService.handleAdMsg:                  （小程序广告推送消息，丢弃）
+//      - WCAdvertisePushService.handlePushMsg:               （朋友圈/小程序广告推送消息，丢弃）
+//      - MagicAdCommonService.onServiceInit                  （通用广告服务，不初始化）
+// 这套“JS 事件 + 推送消息”双入口拦截，是 WCR 实际生效、覆盖所有小程序广告的机制。
+//
 %hook WAAppTaskSplashADConfig
-- (id)splashADEnableNumber {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return @(0);
-    return %orig;
-}
-- (BOOL)canShowSplashADWindow {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return NO;
-    return %orig;
-}
-- (BOOL)splashADHasContent {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return NO;
-    return %orig;
-}
-- (BOOL)canHotStartShowSplashAD {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return NO;
-    return %orig;
-}
-%end
-
-%hook WAAppTask
-- (BOOL)isSplashADFinished {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return YES;
-    return %orig;
-}
-%end
-
-%hook WASplashADWindow
-- (void)showRootViewControllerAnimated:(BOOL)arg1 completion:(id)arg2 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) {
-        // 跳过开屏广告展示，直接执行完成回调：无广告界面、无声音、不卡顿
-        if (arg2) { @try { ((void (^)(id))arg2)(nil); } @catch (__unused NSException *e) {} }
-        return;
-    }
+- (void)handleShowSplashAdCalled:(BOOL)arg1 {
+    // WCR：开屏广告被调用展示的入口。空实现 → 从最上游禁止开屏广告逻辑执行。
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
     %orig;
 }
 %end
 
-// 对齐 WCR 引用的 +[WAExptProxy shouldShowSplashAD]：开屏广告是否展示的总开关。
-// 返回 NO 从最上游禁止开屏广告出现（与上面 WASplashADWindow 跳过展示构成双保险）。
-%hook WAExptProxy
-+ (BOOL)shouldShowSplashAD {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return NO;
+// 开屏广告 JS 事件处理器：小程序内 wx.showSplashAd 调用被丢弃，广告不会拉起。
+%hook WAJSEventHandler_showSplashAd
+- (void)handleJSEvent:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
+    %orig;
+}
+%end
+
+// 开屏广告“菜单”JS 事件处理器：菜单触发同样丢弃。
+%hook WAJSEventHandler_showSplashAdMenu
+- (void)handleJSEvent:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
+    %orig;
+}
+%end
+
+// 广告操作数据 JS 事件处理器：adOperateWXData 的请求/响应数据全部清空（对齐 WCR 4 个落点）。
+%hook WAJSEventHandler_adOperateWXData
+- (void)handleJSEvent:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
+    %orig;
+}
+- (void)endCancel {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
+    %orig;
+}
+- (void)endOKWithData:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
+    %orig;
+}
+- (void)onResponseData:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
+    %orig;
+}
+%end
+
+// 开屏广告窗口：不初始化 → 根本不存在展示窗口，杜绝界面/音频/卡顿。
+%hook WASplashADWindow
+- (id)initWithFrame:(struct CGRect)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return nil;
     return %orig;
 }
 %end
 
-// 小程序/品牌广告消息入口（对齐 WCR：WCR 字符串精确引用 MagicAdPushMgrService）。
-// handleAdMsg: 是推送的广告消息处理入口，拦截它即阻断广告消息进入展示流程。
-// 注意：WCR 并未引用 MagicAdCommonService / MagicAdCGIMgr（那是我此前的非对齐落点），
-// 小程序开屏广告的真实上游是 WAAppTaskSplashADConfig / WASplashADWindow / WAExptProxy（已对齐）。
+// 广告推送消息：小程序/朋友圈广告通过推送消息下发。丢弃 → 广告不落地。
 %hook MagicAdPushMgrService
 - (void)handleAdMsg:(id)arg1 {
     if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
     %orig;
 }
-- (void)OnGetNewXmlMsg:(id)arg1 Type:(id)arg2 MsgWrap:(id)arg3 {
+%end
+
+// 广告推送服务（通用广告推送）：丢弃推送，阻断广告消息入池。
+%hook WCAdvertisePushService
+- (void)handlePushMsg:(id)arg1 {
     if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
     %orig;
 }
 %end
 
-// ========== 4.1 网络层广告拦截（对齐 WCR：按广告 URL 正则拦截/重定向 CGI 请求）[WCR: enhancedAdBlockNetworkEnabled] ==========
-// WCR 网络层（WCRefineEnhancedAdBlockNetworkEnabled）对匹配下列正则的广告 CGI 请求做
-// 重定向/拦截，而非宽泛 URL 黑名单（避免误伤正常请求导致“网络连接失败”）：
-//   advert_group|getadvert|getAdPreloadData|ad_posid|_ads_|/ads_|advertisement_
-// 该正则取自 WCR 二进制 __cstring（cfstring: adurl_regex），是 WCR 网络层广告判定的依据。
-// 对齐落点：WCR 字符串精确引用 NSURLSession 类，网络层在 NSURLSession 公开 dataTask 方法上
-// 拦截（WCR 也引用 URLSession:task:willPerformHTTPRedirection: 重定向回调）。命中广告正则的
-// 请求被替换为本地空 data: 请求——不真正联网、返回空数据，广告代码拿不到广告数据；与 WCR
-// 日志 "url redirect=%d reason=%@ url=%@" 的“重定向/拦截”行为一致。
+// 通用广告服务：不初始化 → 整个通用广告（横幅/插屏）子系统停摆，无广告可展示。
+%hook MagicAdCommonService
+- (void)onServiceInit {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
+    %orig;
+}
+%end
+
+// 网络层广告拦截：dataTask 层命中广告正则的请求被替换为本地空 data: 请求。
+// 关键边界：
+//  1) 不在 HttpClientAppleImpl 的 willPerformHTTPRedirection 里取消重定向——那会误伤正常
+//     重定向链（含激励广告 SDK 的跳转），导致“网络未连接”。只保留 dataTask 层拦截。
+//  2) 激励广告（rewardedFastPass 开启）时跳过拦截：激励由 adHasPlayOver 秒过处理，
+//     网络层再拦会让激励视频加载失败并弹“网络未连接”。
+//  3) 正则只匹配微信专属广告 CGI token（getadvert/ad_posid/advertisement_ 等），且不包含
+//     reward/rewardad/reward-video，避免误伤激励广告自身的视频/数据请求。
 static NSString * const kDDAdBlockAdURLPattern =
     @"advert_group|getadvert|getAdPreloadData|ad_posid|_ads_|/ads_|advertisement_";
 
@@ -523,43 +603,34 @@ static BOOL DDAdBlockURLIsAdRequest(NSURL *url) {
     if (url == nil) return NO;
     NSString *s = [url absoluteString];
     if (s.length == 0) return NO;
+    // 激励广告请求（URL 含 reward/reward-video 等）由 adHasPlayOver 单独处理，网络层不拦，
+    // 否则视频加载失败会弹“网络未连接”。
+    if ([s rangeOfString:@"reward" options:NSCaseInsensitiveSearch].location != NSNotFound) return NO;
     return [s rangeOfString:kDDAdBlockAdURLPattern
                      options:NSRegularExpressionSearch].location != NSNotFound;
 }
 
 %hook NSURLSession
-// 对齐落点：微信所有 CGI / HTTP 请求最终经 NSURLSession 的公开 dataTask 方法发出
-// （MMNetworkHook 在其上做监控/重定向）。Hook 公开方法可确保无论微信 swizzle 顺序如何
-// 都能命中。命中广告 URL 正则的请求替换为本地空 data: 请求——不联网、返回空数据。
+// 对齐落点：微信所有 CGI / HTTP 请求最终经 NSURLSession 的公开 dataTask 方法发出。
+// 命中广告 URL 正则的请求替换为本地空 data: 请求——不联网、返回空数据。
 - (id)dataTaskWithRequest:(NSURLRequest *)arg1 completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))arg2 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].network && DDAdBlockURLIsAdRequest([arg1 URL])) {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].network
+        && ![DDAdBlockConfig sharedConfig].rewardedFastPass
+        && DDAdBlockURLIsAdRequest([arg1 URL])) {
         NSURLRequest *dr = [NSURLRequest requestWithURL:[NSURL URLWithString:@"data:text/plain;charset=utf-8,"]];
         return %orig(dr, arg2);
     }
     return %orig;
 }
 - (id)dataTaskWithURL:(NSURL *)arg1 completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))arg2 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].network && DDAdBlockURLIsAdRequest(arg1)) {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].network
+        && ![DDAdBlockConfig sharedConfig].rewardedFastPass
+        && DDAdBlockURLIsAdRequest(arg1)) {
         // 本方法第一个参数是 NSURL *，需替换为空 data: URL（非 NSURLRequest *）
         NSURL *du = [NSURL URLWithString:@"data:text/plain;charset=utf-8,"];
         return %orig(du, arg2);
     }
     return %orig;
-}
-%end
-
-// 精确对齐 WCR 网络层真实落点：WCR 在 NSURLSession 委托的 HTTP 重定向回调里拦截广告 CGI
-// （二进制引用 URLSession:task:willPerformHTTPRedirection:newRequest:completionHandler:，并打
-// "url redirect=%d reason=%@ url=%@" 日志）。微信全局 NSURLSession 封装为 HttpClientAppleImpl，
-// 它实现了该委托方法。命中广告正则的重定向（如广告点击跳转落地页）直接取消，不跟随。
-// 与上方 dataTask 替换构成纵深：dataTask 阻断广告 CGI 联网，本 Hook 兜底拦截任何漏网重定向。
-%hook HttpClientAppleImpl
-- (void)URLSession:(id)arg1 task:(id)arg2 willPerformHTTPRedirection:(id)arg3 newRequest:(NSURLRequest *)arg4 completionHandler:(void (^)(NSURLRequest *))arg5 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].network && DDAdBlockURLIsAdRequest([arg4 URL])) {
-        if (arg5) arg5(nil);   // 取消重定向，对齐 WCR 的“拦截广告 CGI 跳转”
-        return;
-    }
-    %orig;
 }
 %end
 
@@ -609,28 +680,21 @@ static BOOL DDAdBlockURLIsAdRequest(NSURL *url) {
 }
 %end
 
-// ========== 7. 激励广告快速过（对齐 WCR：adHasPlayOver 跳过 + 进入即收起）[WCR: enhancedAdBlockRewardedAdFastPassEnabled] ==========
+// ========== 7. 激励广告快速过（精确对齐 WCR：adHasPlayOver + viewDidLoad）[WCR: enhancedAdBlockRewardedAdFastPassEnabled] ==========
 %hook WCFinderRewardAdViewController
 // 让系统认为激励视频已播放完毕，跳过倒计时/等待并触发奖励结算（WCR 同款核心）
 - (BOOL)adHasPlayOver {
     if (ddActive() && [DDAdBlockConfig sharedConfig].rewardedFastPass) return YES;
     return %orig;
 }
-// 在进入动画开始前就收起（animated:NO），视频尚未起播即关闭 → 无界面、无声音、真正“秒过”
-- (void)viewWillAppear:(BOOL)arg1 {
+// WCR 精确落点：viewDidLoad 空实现 → 进入激励页时不初始化视频/倒计时/数据加载，
+// 配合 adHasPlayOver 返回 YES 即“无界面、无声音、真正秒过”，且不触发视频网络请求，
+// 不会出现“网络未连接”。
+// 注：WCR 不 hook viewWillAppear/viewDidAppear（该 VC 由导航栈 push，dismiss 无效），
+// 也不 hook 网络层去拦激励视频，避免误伤激励请求导致“网络未连接”。
+- (void)viewDidLoad {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].rewardedFastPass) return;
     %orig;
-    if (ddActive() && [DDAdBlockConfig sharedConfig].rewardedFastPass) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [(id)self dismissViewControllerAnimated:NO completion:nil];
-        });
-    }
-}
-// 兜底：viewWillAppear 收起失败时在 viewDidAppear 再收一次
-- (void)viewDidAppear:(BOOL)arg1 {
-    %orig;
-    if (ddActive() && [DDAdBlockConfig sharedConfig].rewardedFastPass) {
-        [(id)self dismissViewControllerAnimated:NO completion:nil];
-    }
 }
 %end
 
@@ -761,7 +825,7 @@ static BOOL DDAdBlockURLIsAdRequest(NSURL *url) {
             id mgr = [mgrClass sharedInstance];
             if ([mgr respondsToSelector:@selector(registerControllerWithTitle:version:controller:)]) {
                 [mgr registerControllerWithTitle:@"DD广告拦截"
-                                         version:@"1.1.0"
+                                         version:@"1.2.0"
                                       controller:@"DDAdBlockSettingsViewController"];
             }
         }
