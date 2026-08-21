@@ -678,7 +678,6 @@ static BOOL DDAdBlockURLIsAdRequest(NSURL *url) {
 
 @interface WCTableViewSectionManager : NSObject
 + (id)sectionWithHeader:(NSString *)header;
-+ (id)sectionWithHeader:(NSString *)header Footer:(id)footer;
 - (void)addCell:(id)arg1;
 @end
 
@@ -714,8 +713,7 @@ static BOOL DDAdBlockURLIsAdRequest(NSURL *url) {
     DDAdBlockConfig *cfg = [DDAdBlockConfig sharedConfig];
 
     // 总开关：最上方独立单元格
-    WCTableViewSectionManager *secMaster = [sectionCls sectionWithHeader:@"DD广告拦截"
-                                                                  Footer:@"开关命名与 WCR（WCRefine）广告拦截模块对齐：enhancedAdBlock*Enabled（moments/brand/finder/live/miniProgram/network/search/rewardedAdFastPass/expt）；青少年弹窗对应 disableTeenagerPopupEnabled。"];
+    WCTableViewSectionManager *secMaster = [sectionCls sectionWithHeader:@"DD广告拦截"];
     [secMaster addCell:[cellCls switchCellForSel:@selector(onMasterSwitch:) target:self title:@"启用广告拦截" on:cfg.master]];
     [_tableViewManager addSection:secMaster];
 
