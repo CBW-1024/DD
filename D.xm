@@ -1,5 +1,3 @@
-#warning 本文件为 Logos(Theos) tweak 源文件，需用 Theos 工具链编译为 .dylib 后随 MobileSubstrate 注入微信。
-#warning 编译: 将本文件作为 Tweak.xm，配合 Makefile(ARCHS=arm64, TARGET=iphone:latest:14.0) 与 control 文件。
 //
 //  DDAdBlock.xm
 //  插件名: DD广告拦截   版本: 1.0.0
@@ -544,10 +542,9 @@ static NSString *DDAdBlockMiniAppInjectJS(void) {
 %hook WCFinderRewardAdViewController
 - (void)viewDidAppear:(BOOL)arg1 {
     if (ddActive() && [DDAdBlockConfig sharedConfig].rewardedFastPass) {
-        if ([self respondsToSelector:@selector(dismissViewControllerAnimated:completion:)]) {
-            [self dismissViewControllerAnimated:YES completion:nil];
-            return;
-        }
+        // self 在此为前向声明的 WCFinderRewardAdViewController，强转为 id 调用 dismiss 避免前向声明报错
+        [(id)self dismissViewControllerAnimated:YES completion:nil];
+        return;
     }
     %orig;
 }
