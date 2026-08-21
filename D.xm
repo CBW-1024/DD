@@ -1,90 +1,682 @@
-#import <Foundation/Foundation.h>
+#warning 本文件为 Logos(Theos) tweak 源文件，需用 Theos 工具链编译为 .dylib 后随 MobileSubstrate 注入微信。
+#warning 编译: 将本文件作为 Tweak.xm，配合 Makefile(ARCHS=arm64, TARGET=iphone:latest:14.0) 与 control 文件。
+//
+//  DDAdBlock.xm
+//  插件名: DD广告拦截   版本: 1.0.0
+//  功能:   从 WCRefine 的 EnhancedAdBlock 模块提取广告拦截能力，重建为独立单文件 tweak。
+//  开关对齐 WCRefineEnhancedAdBlock* 的 10 个 UI 开关（总/朋友圈/公众号/视频号/直播/
+//           小程序/网络层/搜索/激励快过/青少年弹窗），入口与设置界面参考 WechatNoAds。
+//
+//  说明:
+//   - 入口与设置界面参考 WechatNoAds（WCPluginsMgr 注册 + 原生 WCTableViewManager）；
+//   - 所有去广告的“核心类与方法”均对齐 WCRefine：通过在 WCRefine.dylib 字符串集与
+//     5.1 万份微信头文件交叉核对，只 Hook WCR 实际引用的微信去广告方法（数据层
+//     WCAdvertiseDataHelper / 解析层 BrandAdDataParser / 展示层 WCFinderAdCountdownBannerView /
+//     推送层 MagicAdPushMgrService·WCAdvertisePushService / 上报层 WCAdvertiseStatMgr / 弹窗
+//     WCFinderTimelineTabViewController 等），不引入任何猜测类；
+//   - 10 个开关【默认全部关闭】，需在设置内手动开启；每个方法经总开关 + 分区开关双重门控；
+//   - 所有 %hook 类若不存在（微信版本差异）则 Logos 自动跳过，不影响其余功能。
+//
+
 #import <UIKit/UIKit.h>
-#import <dlfcn.h>
+#import <Foundation/Foundation.h>
+#import <WebKit/WebKit.h>
+#import <objc/runtime.h>
 
-// 微信官方 Bundle ID（用于伪装）
-static NSString *const kOfficialBundleID = @"com.tencent.xin";
+// ========== 插件管理入口（参考 WechatNoAds） ==========
+@interface WCPluginsMgr : NSObject
++ (instancetype)sharedInstance;
+- (void)registerControllerWithTitle:(NSString *)title version:(NSString *)version controller:(NSString *)controller;
+@end
 
+// ========== 配置类（对齐 WCRefineEnhancedAdBlock* 的 10 个开关） ==========
+static NSString * const kDDAdBlockMasterKey            = @"DDAdBlock_Master";
+static NSString * const kDDAdBlockMomentsKey           = @"DDAdBlock_Moments";
+static NSString * const kDDAdBlockBrandKey             = @"DDAdBlock_Brand";
+static NSString * const kDDAdBlockFinderKey            = @"DDAdBlock_Finder";
+static NSString * const kDDAdBlockLiveKey              = @"DDAdBlock_Live";
+static NSString * const kDDAdBlockMiniProgramKey       = @"DDAdBlock_MiniProgram";
+static NSString * const kDDAdBlockNetworkKey           = @"DDAdBlock_Network";
+static NSString * const kDDAdBlockSearchKey            = @"DDAdBlock_Search";
+static NSString * const kDDAdBlockRewardedFastPassKey  = @"DDAdBlock_RewardedAdFastPass";
+static NSString * const kDDAdBlockTeenagerPopupKey     = @"DDAdBlock_TeenagerPopup";
 
-#pragma mark - NSBundle Hook：篡改 bundleIdentifier
+@interface DDAdBlockConfig : NSObject
++ (instancetype)sharedConfig;
+@property (assign, nonatomic) BOOL master;            // 总开关（对应 EnhancedAdBlockEnabled）
+@property (assign, nonatomic) BOOL moments;           // 朋友圈（EnhancedAdBlockMomentsEnabled）
+@property (assign, nonatomic) BOOL brand;             // 公众号（EnhancedAdBlockBrandEnabled）
+@property (assign, nonatomic) BOOL finder;            // 视频号（EnhancedAdBlockFinderEnabled）
+@property (assign, nonatomic) BOOL live;              // 直播（EnhancedAdBlockLiveEnabled）
+@property (assign, nonatomic) BOOL miniProgram;       // 小程序（EnhancedAdBlockMiniProgramEnabled）
+@property (assign, nonatomic) BOOL network;           // 网络层（EnhancedAdBlockNetworkEnabled）
+@property (assign, nonatomic) BOOL search;            // 搜索（EnhancedAdBlockSearchEnabled）
+@property (assign, nonatomic) BOOL rewardedFastPass;  // 激励广告快速过（EnhancedAdBlockRewardedAdFastPassEnabled）
+@property (assign, nonatomic) BOOL teenagerPopup;     // 青少年弹窗（EnhancedAdBlockTeenagerPopupDisabled）
+@end
 
-%hook NSBundle
-
-/**
- * 篡改主程序的 bundleIdentifier，仅在主程序自身代码读取时伪装成微信官方包名，
- * 以绕过某些基于 bundle ID 的检测（如越狱检测、环境校验）。
- * 对系统框架、第三方动态库等外部调用保持原样，避免副作用。
- */
-- (NSString *)bundleIdentifier {
-    // 先获取原始 bundleIdentifier（系统真实值）
-    NSString *origVal = %orig;
-
-    // ① 非主 Bundle（如系统库、插件等）直接放行，只干预主程序自身。
-    if (self != [NSBundle mainBundle]) {
-        return origVal;
-    }
-
-    // ② 如果原始值已经是目标官方包名，直接返回，避免后续栈回溯开销。
-    if ([origVal isEqualToString:kOfficialBundleID]) {
-        return origVal;
-    }
-
-    // ③ 获取当前调用栈地址，用于判断调用者是否来自主程序内部。
-    NSArray *stack = [NSThread callStackReturnAddresses];
-    NSUInteger depth = stack.count;
-    // 栈深度不足 3 则无法获取有效调用帧，直接放行。
-    if (depth < 3) {
-        return origVal;
-    }
-
-    // 取第 3 帧（索引 2）的地址，通常是调用本方法的直接调用者。
-    unsigned long long frameAddr =
-        [[stack objectAtIndexedSubscript:2] unsignedLongValue];
-
-    // ④ 通过 dladdr 获取该地址对应的符号信息，包括所属镜像路径。
-    Dl_info info;
-    memset(&info, 0, sizeof(info));
-    if (dladdr((const void *)(uintptr_t)frameAddr, &info) == 0) {
-        // 若解析失败，无法判断调用来源，安全起见放行。
-        return origVal;
-    }
-
-    // ⑤ 获取调用者所在二进制文件的路径。
-    NSString *frameName = [NSString stringWithUTF8String:info.dli_fname ?: ""];
-    // 主程序 Bundle 路径（如 /var/containers/Bundle/Application/xxx/WeChat.app）
-    NSString *mainPath = [[NSBundle mainBundle] bundlePath];
-
-    // 判断调用者是否位于主程序包内（包括主可执行文件及内嵌 Framework）。
-    BOOL fromMain = (mainPath.length > 0 && [frameName hasPrefix:mainPath]);
-
-    // ⑥ 只有主程序自身的代码调用时才返回伪装包名，其他所有外部调用保留真实值。
-    return fromMain ? kOfficialBundleID : origVal;
+@implementation DDAdBlockConfig
++ (instancetype)sharedConfig {
+    static DDAdBlockConfig *config = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ config = [DDAdBlockConfig new]; });
+    return config;
 }
+- (instancetype)init {
+    if (self = [super init]) {
+        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+        // 全部默认关闭（开关需在设置内手动开启）
+        if ([ud objectForKey:kDDAdBlockMasterKey]           == nil) [ud setBool:NO forKey:kDDAdBlockMasterKey];
+        if ([ud objectForKey:kDDAdBlockMomentsKey]          == nil) [ud setBool:NO forKey:kDDAdBlockMomentsKey];
+        if ([ud objectForKey:kDDAdBlockBrandKey]            == nil) [ud setBool:NO forKey:kDDAdBlockBrandKey];
+        if ([ud objectForKey:kDDAdBlockFinderKey]           == nil) [ud setBool:NO forKey:kDDAdBlockFinderKey];
+        if ([ud objectForKey:kDDAdBlockLiveKey]             == nil) [ud setBool:NO forKey:kDDAdBlockLiveKey];
+        if ([ud objectForKey:kDDAdBlockMiniProgramKey]      == nil) [ud setBool:NO forKey:kDDAdBlockMiniProgramKey];
+        if ([ud objectForKey:kDDAdBlockNetworkKey]          == nil) [ud setBool:NO forKey:kDDAdBlockNetworkKey];
+        if ([ud objectForKey:kDDAdBlockSearchKey]           == nil) [ud setBool:NO forKey:kDDAdBlockSearchKey];
+        if ([ud objectForKey:kDDAdBlockRewardedFastPassKey] == nil) [ud setBool:NO forKey:kDDAdBlockRewardedFastPassKey];
+        if ([ud objectForKey:kDDAdBlockTeenagerPopupKey]    == nil) [ud setBool:NO forKey:kDDAdBlockTeenagerPopupKey];
 
+        _master           = [ud boolForKey:kDDAdBlockMasterKey];
+        _moments          = [ud boolForKey:kDDAdBlockMomentsKey];
+        _brand            = [ud boolForKey:kDDAdBlockBrandKey];
+        _finder           = [ud boolForKey:kDDAdBlockFinderKey];
+        _live             = [ud boolForKey:kDDAdBlockLiveKey];
+        _miniProgram      = [ud boolForKey:kDDAdBlockMiniProgramKey];
+        _network          = [ud boolForKey:kDDAdBlockNetworkKey];
+        _search           = [ud boolForKey:kDDAdBlockSearchKey];
+        _rewardedFastPass = [ud boolForKey:kDDAdBlockRewardedFastPassKey];
+        _teenagerPopup    = [ud boolForKey:kDDAdBlockTeenagerPopupKey];
+    }
+    return self;
+}
+- (void)setMaster:(BOOL)value {
+    _master = value;
+    [[NSUserDefaults standardUserDefaults] setBool:value forKey:kDDAdBlockMasterKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+- (void)setMoments:(BOOL)value {
+    _moments = value;
+    [[NSUserDefaults standardUserDefaults] setBool:value forKey:kDDAdBlockMomentsKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+- (void)setBrand:(BOOL)value {
+    _brand = value;
+    [[NSUserDefaults standardUserDefaults] setBool:value forKey:kDDAdBlockBrandKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+- (void)setFinder:(BOOL)value {
+    _finder = value;
+    [[NSUserDefaults standardUserDefaults] setBool:value forKey:kDDAdBlockFinderKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+- (void)setLive:(BOOL)value {
+    _live = value;
+    [[NSUserDefaults standardUserDefaults] setBool:value forKey:kDDAdBlockLiveKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+- (void)setMiniProgram:(BOOL)value {
+    _miniProgram = value;
+    [[NSUserDefaults standardUserDefaults] setBool:value forKey:kDDAdBlockMiniProgramKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+- (void)setNetwork:(BOOL)value {
+    _network = value;
+    [[NSUserDefaults standardUserDefaults] setBool:value forKey:kDDAdBlockNetworkKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+- (void)setSearch:(BOOL)value {
+    _search = value;
+    [[NSUserDefaults standardUserDefaults] setBool:value forKey:kDDAdBlockSearchKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+- (void)setRewardedFastPass:(BOOL)value {
+    _rewardedFastPass = value;
+    [[NSUserDefaults standardUserDefaults] setBool:value forKey:kDDAdBlockRewardedFastPassKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+- (void)setTeenagerPopup:(BOOL)value {
+    _teenagerPopup = value;
+    [[NSUserDefaults standardUserDefaults] setBool:value forKey:kDDAdBlockTeenagerPopupKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+@end
+
+// 总开关守卫：所有 Hook 先经过它
+static BOOL ddActive(void) { return [DDAdBlockConfig sharedConfig].master; }
+
+// ============================================================================
+//  以下所有 Hook 的微信类与方法，均来自对 WCRefine.dylib 字符串集与 5.1 万份
+//  微信头文件的交叉核对：只 Hook WCR 实际引用的微信“去广告”方法（数据层 / 解析层 /
+//  展示层 / 推送层 / 上报层 / 弹窗），不引入任何猜测类。
+//  每个方法都先经过 ddActive()(总开关) 与对应分区开关双重门控；分区开关默认全关。
+// ============================================================================
+
+// ---------- 1. 朋友圈广告（对齐 WCR: WCAdvertiseDataHelper 数据层 + WCTimelineMgr 实时插入） ----------
+%hook WCAdvertiseDataHelper
+- (void)saveAdPullCompareInfo:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].moments) return;
+    %orig;
+}
+- (void)saveAdvertiseMsgXmlDatas {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].moments) return;
+    %orig;
+}
+- (void)addAdvertiseDataList:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].moments) return;
+    %orig;
+}
+- (void)saveAdvertiseDatas {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].moments) return;
+    %orig;
+}
+- (void)tryLoadAdvertiseData {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].moments) return;
+    %orig;
+}
+- (BOOL)isAdPreviewExpired:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].moments) return YES;
+    return %orig;
+}
 %end
 
-
-#pragma mark - FaceRecogFlashHandler Hook：确保人脸流水线正常初始化
-
-%hook FaceRecogFlashHandler
-
-/**
- * 钩住人脸识别处理器的初始化方法，仅透传调用原实现。
- * 目的是让该方法被正常执行，防止某些检测机制因方法未被调用而判定环境异常。
- * （例如部分越狱检测会 hook 该方法返回空，导致人脸识别功能失效，此处确保其正常运行）
- */
-- (void)initPipeline {
-    %orig;  // 直接调用原始方法，不做任何修改
+%hook WCTimelineMgr
+- (id)getAdvertiseDataByCurMinTime:(unsigned int)arg1 MaxTime:(unsigned int)arg2 checkDataValid:(BOOL)arg3 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].moments) return [NSMutableArray array];
+    return %orig;
 }
-
+- (id)getAdvertiseDataByCurMinTime:(unsigned int)arg1 MaxTime:(unsigned int)arg2 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].moments) return [NSMutableArray array];
+    return %orig;
+}
+- (id)getTopAdvertiseDataByTopNumber:(unsigned int)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].moments) return [NSMutableArray array];
+    return %orig;
+}
+- (void)onAdPullWithAdDatas:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].moments) return;
+    %orig;
+}
+- (void)tryToProcessWithNewAdList:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].moments) return;
+    %orig;
+}
 %end
 
+// ---------- 2. 公众号广告（对齐 WCR: BrandTLExptConfig + BrandTLCanvasCardMgr + BrandAdDataParser） ----------
+%hook BrandTLExptConfig
+- (BOOL)isExptNotShowAd {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return YES;
+    return %orig;
+}
+%end
 
-#pragma mark - 构造函数：初始化所有 Hook
+%hook BrandTLCanvasCardMgr
+- (BOOL)isAdCardOpen {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return NO;
+    return %orig;
+}
+- (BOOL)isAdRequestOpen {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return NO;
+    return %orig;
+}
+- (void)handleBizAdNotifyNewXml:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return;
+    %orig;
+}
+%end
 
+// 公众号广告解析层：把广告内容/消息解析成广告对象的入口，直接返回 nil 即不生成广告。
+%hook BrandAdDataParser
++ (id)adDataItemForContent:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return nil;
+    return %orig;
+}
++ (id)adDataItemForMsgWrap:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return nil;
+    return %orig;
+}
++ (id)adInfoDicForContent:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return nil;
+    return %orig;
+}
++ (id)adInfoDicForMsgWrap:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return nil;
+    return %orig;
+}
+%end
+
+// ---------- 2.x 公众号/小程序 的 WebView 广告（对齐 WCR: 引用 MMWebViewController / WAWebViewController） ----------
+// 2.a 广告容器 CSS 隐藏规则（选择器来自实机 DOM 探针）
+static NSString *DDAdBlockMPHideCSS(void) {
+    return @".iframe_ad_container,.iframe_adv_ad_container,"
+            ".comment-ad-container,"
+            "li.cidad_comment_constant_key,#cidad_comment_constant_key,"
+            ".adv_keyword_search,.ad_control-tips"
+            "{display:none!important;height:0!important;min-height:0!important;"
+            "margin:0!important;padding:0!important;overflow:hidden!important;}";
+}
+static NSString *DDAdBlockMPHideParentCSS(void) {
+    return @"div:has(> .iframe_ad_container),li:has(> .comment-ad-container)"
+            "{display:none!important;height:0!important;}";
+}
+static NSString *DDAdBlockInjectJS(void) {
+    return [NSString stringWithFormat:
+        @"(function(){try{"
+         "if(!document.getElementById('__dd_adblock')){"
+         "var s=document.createElement('style');s.id='__dd_adblock';"
+         "s.textContent='%@'+'%@';"
+         "(document.head||document.documentElement).appendChild(s);}"
+         "var sweep=function(){try{Array.prototype.forEach.call("
+         "document.querySelectorAll('.iframe_ad_container,.comment-ad-container'),"
+         "function(e){var p=e.parentElement,n=0;"
+         "while(p&&n<3){if(p.tagName==='LI'||(p.className&&/comment-ad|discuss_media/.test(p.className))){"
+         "p.style.setProperty('display','none','important');break;}p=p.parentElement;n++;}});}catch(e){}};"
+         "sweep();"
+         "if(!window.__dd_ob&&window.MutationObserver){"
+         "var t=null;window.__dd_ob=new MutationObserver(function(){"
+         "if(t)return;t=setTimeout(function(){t=null;sweep();},300);});"
+         "window.__dd_ob.observe(document.documentElement,{childList:true,subtree:true});}"
+         "}catch(e){}})();",
+        DDAdBlockMPHideCSS(), DDAdBlockMPHideParentCSS()];
+}
+
+// 2.b 网络层广告 URL 黑名单（对应 WCR 的 ShouldBlockAdWebEvent / ShouldRedirectURLString）
+static NSArray<NSString *> *DDAdBlockURLBlocklist(void) {
+    static NSArray *list;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        list = @[
+            @"wxa.wxs.qq.com/tmpl/px/",            // 公众号/文章内广告 iframe
+            @"wxa.wxs.qq.com/tmpl/lite/",
+            @"support.weixin.qq.com/cgi-bin/mmsupport-bin/", // 部分广告上报/素材
+            @"wxapp.tc.qq.com/ad/",               // 小程序广告素材
+            @"cpro.baidu.com",                    // 搜索/信息流联盟广告
+            @"pos.baidu.com",
+            @"go.mobile.qq.com/ad",
+            @"/cgi-bin/mmbiz-bin/ad",
+            @"ad.weixin.qq.com",
+            @"wxad",
+            @"adunit-",                            // 小程序 adUnitId
+            @"_ad_",
+            @"&adpos=",
+        ];
+    });
+    return list;
+}
+static BOOL ddURLIsAd(NSString *url) {
+    if (url.length == 0) return NO;
+    for (NSString *sub in DDAdBlockURLBlocklist()) {
+        if ([url containsString:sub]) return YES;
+    }
+    return NO;
+}
+
+%hook MMWebViewController
+- (id)webViewUserScriptsForConfiguration {
+    id scripts = %orig;
+    DDAdBlockConfig *cfg = [DDAdBlockConfig sharedConfig];
+    if (!(ddActive() && (cfg.brand || cfg.network))) return scripts;
+    NSMutableArray *arr = [scripts isKindOfClass:[NSArray class]]
+        ? [(NSArray *)scripts mutableCopy]
+        : [NSMutableArray array];
+    WKUserScript *us = [[WKUserScript alloc] initWithSource:DDAdBlockInjectJS()
+                                             injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+                                          forMainFrameOnly:NO];
+    [arr addObject:us];
+    return arr;
+}
+- (BOOL)webView:(id)arg1 shouldStartLoadWithRequest:(id)arg2 navigationType:(long long)arg3 isMainFrame:(BOOL)arg4 navigationAction:(id)arg5 {
+    DDAdBlockConfig *cfg = [DDAdBlockConfig sharedConfig];
+    if (ddActive() && (cfg.brand || cfg.network) && !arg4) {
+        NSString *u = [[(NSURLRequest *)arg2 URL] absoluteString];
+        if ([u containsString:@"wxa.wxs.qq.com"] && [u containsString:@"/tmpl/px/"]) return NO;
+        if (ddActive() && cfg.network && ddURLIsAd(u)) return NO;
+    }
+    return %orig;
+}
+- (void)webViewDidFinishLoad:(id)arg1 navigation:(id)arg2 {
+    %orig;
+    DDAdBlockConfig *cfg = [DDAdBlockConfig sharedConfig];
+    if (!(ddActive() && (cfg.brand || cfg.network))) return;
+    WKWebView *wv = nil;
+    @try { wv = [(id)self valueForKey:@"webView"]; } @catch (__unused NSException *e) {}
+    if (![wv isKindOfClass:[WKWebView class]]) return;
+    [wv evaluateJavaScript:DDAdBlockInjectJS() completionHandler:nil];
+}
+%end
+
+// ---------- 3. 视频号广告（对齐 WCR: WCFinderComment + WCFinderDataItem + WCAdFinderInfo） ----------
+%hook WCFinderComment
+- (id)advertisementInfo {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return nil;
+    return %orig;
+}
+- (id)commentAdImageUrl {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return nil;
+    return %orig;
+}
+- (id)promotionInfo {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return nil;
+    return %orig;
+}
+%end
+
+%hook WCFinderDataItem
+- (unsigned long long)adFlag {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return 0;
+    return %orig;
+}
+%end
+
+%hook WCAdFinderInfo
+- (BOOL)isValid {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return NO;
+    return %orig;
+}
+%end
+
+// ---------- 4. 小程序广告（对齐 WCR: WAAppTaskSplashADConfig + WA*SplashAd + adOperateWXData + MagicAd* + PushService） ----------
+%hook WAAppTaskSplashADConfig
+- (void)handleShowSplashAdCalled:(BOOL)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
+    %orig;
+}
+%end
+
+%hook WAJSEventHandler_showSplashAd
+- (void)handleJSEvent:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
+    %orig;
+}
+%end
+
+%hook WAJSEventHandler_showSplashAdMenu
+- (void)handleJSEvent:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
+    %orig;
+}
+%end
+
+%hook WAJSEventHandler_adOperateWXData
+- (void)handleJSEvent:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
+    %orig;
+}
+%end
+
+// 小程序 MagicAd 自有广告位（按 posId 拉取，覆盖小程序位、支付完成页等）
+%hook MagicAdCommonService
+- (id)getAdInfoWithPosId:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return nil;
+    return %orig;
+}
+- (id)internalGetAdInfoFromCacheWithPosId:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return nil;
+    return %orig;
+}
+- (void)getAdInfoAsyncWithPosId:(id)arg1 completion:(id)arg2 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
+    %orig;
+}
+- (void)getAdInfoAsyncWithPosId:(id)arg1 timeoutMs:(long long)arg2 completion:(id)arg3 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
+    %orig;
+}
+- (void)triggerUpdateAdWithPosId:(id)arg1 pullType:(unsigned char)arg2 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
+    %orig;
+}
+- (void)updateAdInfoByCGIInstantlyWithPosId:(id)arg1 pullType:(unsigned char)arg2 isDelayPull:(BOOL)arg3 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
+    %orig;
+}
+%end
+
+%hook MagicAdCGIMgr
++ (void)getAdsCGIWithPosIds:(id)arg1 successBlock:(id)arg2 failBlock:(id)arg3 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
+    %orig;
+}
+%end
+
+// 小程序广告推送（WCR 实际引用的推送处理入口，直接丢弃广告消息）
+%hook MagicAdPushMgrService
+- (void)handleAdMsg:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
+    %orig;
+}
+%end
+
+%hook WCAdvertisePushService
+- (void)handlePushMsg:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
+    %orig;
+}
+%end
+
+// 小程序广告组件（wx-ad / wx-ad-custom，直接出现在 DOM，需注入样式表隐藏）
+static NSString *DDAdBlockMiniAppHideCSS(void) {
+    return @"wx-ad,wx-ad-custom,ad,ad-custom,"
+            ".wx-ad,.wx-ad-custom"
+            "{display:none!important;height:0!important;min-height:0!important;"
+            "max-height:0!important;margin:0!important;padding:0!important;"
+            "overflow:hidden!important;}";
+}
+static NSString *DDAdBlockMiniAppInjectJS(void) {
+    return [NSString stringWithFormat:
+        @"(function(){try{"
+         "if(!document.getElementById('__dd_adblock_wa')){"
+         "var s=document.createElement('style');s.id='__dd_adblock_wa';"
+         "s.textContent='%@';"
+         "(document.head||document.documentElement).appendChild(s);}"
+         "var sweep=function(){try{Array.prototype.forEach.call("
+         "document.querySelectorAll('wx-ad,wx-ad-custom,.wx-ad,.wx-ad-custom'),"
+         "function(e){e.style.setProperty('display','none','important');"
+         "e.style.setProperty('height','0','important');"
+         "e.style.setProperty('max-height','0','important');});}catch(e){}};"
+         "sweep();"
+         "if(!window.__dd_ob_wa&&window.MutationObserver){"
+         "var t=null;window.__dd_ob_wa=new MutationObserver(function(){"
+         "if(t)return;t=setTimeout(function(){t=null;sweep();},300);});"
+         "window.__dd_ob_wa.observe(document.documentElement,{childList:true,subtree:true});}"
+         "}catch(e){}})();",
+        DDAdBlockMiniAppHideCSS()];
+}
+%hook WAWebViewController
+- (void)webViewDidFinishLoad:(id)arg1 navigation:(id)arg2 {
+    %orig;
+    if (!(ddActive() && [DDAdBlockConfig sharedConfig].miniProgram)) return;
+    id wv = nil;
+    @try { wv = [(id)self valueForKey:@"webView"]; } @catch (__unused NSException *e) {}
+    if (![wv respondsToSelector:@selector(evaluateJavaScript:completionHandler:)]) return;
+    [wv evaluateJavaScript:DDAdBlockMiniAppInjectJS() completionHandler:nil];
+}
+- (BOOL)webView:(id)arg1 shouldStartLoadWithRequest:(id)arg2 navigationType:(long long)arg3 isMainFrame:(BOOL)arg4 navigationAction:(id)arg5 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram && !arg4) {
+        NSString *u = [[(NSURLRequest *)arg2 URL] absoluteString];
+        if (ddURLIsAd(u)) return NO;
+    }
+    return %orig;
+}
+%end
+
+// ---------- 5. 直播广告（对齐 WCR: WCFinderLiveHomePageViewController + WCFinderAdCountdownBannerView） ----------
+%hook WCFinderAdCountdownBannerView
+- (void)setupSubviews {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].live) return;
+    %orig;
+}
+- (void)startCountdown {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].live) return;
+    %orig;
+}
+- (void)updateUIWithTime:(long long)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].live) return;
+    %orig;
+}
+- (BOOL)adHasPlayOver {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].live) return YES;
+    return %orig;
+}
+%end
+
+%hook WCFinderLiveHomePageViewController
+- (void)onAdSectionView:(id)arg1 selectElementVM:(id)arg2 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].live) return;
+    %orig;
+}
+%end
+
+// ---------- 6. 搜索广告（对齐 WCR: WCAdSearchH5Info） ----------
+%hook WCAdSearchH5Info
+- (BOOL)isValid {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].search) return NO;
+    return %orig;
+}
++ (id)fromXML:(struct XmlReaderNode_t *)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].search) return nil;
+    return %orig;
+}
+%end
+
+// ---------- 7. 激励广告快速过（对齐 WCR: WCFinderRewardAdViewController） ----------
+%hook WCFinderRewardAdViewController
+- (void)viewDidAppear:(BOOL)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].rewardedFastPass) {
+        if ([self respondsToSelector:@selector(dismissViewControllerAnimated:completion:)]) {
+            [self dismissViewControllerAnimated:YES completion:nil];
+            return;
+        }
+    }
+    %orig;
+}
+%end
+
+// ---------- 8. 青少年模式弹窗（对齐 WCR: WCFinderTimelineTabViewController） ----------
+%hook WCFinderTimelineTabViewController
+- (void)showTeenagerBlockAlertView {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].teenagerPopup) return;
+    %orig;
+}
+- (void)showTeenagerNavView {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].teenagerPopup) return;
+    %orig;
+}
+- (void)onShowTeenagerRestWithScene:(unsigned long long)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].teenagerPopup) return;
+    %orig;
+}
+%end
+
+// ---------- 9. 广告曝光上报抑制（对齐 WCR: WCAdvertiseStatMgr，归在总开关下） ----------
+// WCR 引用了广告统计上报类；关闭上报既不泄露浏览行为，也避免广告被“计入展示”。
+%hook WCAdvertiseStatMgr
+- (id)getAdvertiseInfoForItem:(id)arg1 {
+    if (ddActive()) return nil;
+    return %orig;
+}
+- (void)logHeadImageH5:(id)arg1 { if (ddActive()) return; %orig; }
+- (void)logADBrandProfile:(id)arg1 { if (ddActive()) return; %orig; }
+- (void)logADFloatView:(id)arg1 { if (ddActive()) return; %orig; }
+- (void)logADPoiH5:(id)arg1 { if (ddActive()) return; %orig; }
+- (void)logADH5:(id)arg1 withUserInfo:(id)arg2 reportType:(unsigned long long)arg3 { if (ddActive()) return; %orig; }
+- (void)logADCommentLog:(id)arg1 { if (ddActive()) return; %orig; }
+- (void)logADBodyLog:(id)arg1 { if (ddActive()) return; %orig; }
+- (void)reportAllFeedsADLog { if (ddActive()) return; %orig; }
+%end
+
+// ========== 设置界面（参考 WechatNoAds） ==========
+@interface WCTableViewManager : NSObject
+- (id)initWithFrame:(CGRect)frame style:(NSInteger)style;
+@property (nonatomic, readonly) UITableView *tableView;
+@property (nonatomic, weak) id delegate;
+- (void)clearAllSection;
+- (void)addSection:(id)arg1;
+- (void)reloadTableView;
+@end
+
+@interface WCTableViewSectionManager : NSObject
++ (id)sectionWithHeader:(NSString *)header;
+- (void)addCell:(id)arg1;
+@end
+
+@interface WCTableViewCellManager : NSObject
++ (id)switchCellForSel:(SEL)sel target:(id)target title:(id)title on:(BOOL)on;
+@end
+
+@interface DDAdBlockSettingsViewController : UIViewController
+@property (nonatomic, strong) WCTableViewManager *tableViewManager;
+@end
+
+@implementation DDAdBlockSettingsViewController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"DD广告拦截";
+    self.view.backgroundColor = [UIColor systemBackgroundColor];
+
+    Class managerCls = %c(WCTableViewManager);
+    _tableViewManager = [[managerCls alloc] initWithFrame:self.view.bounds style:UITableViewStyleInsetGrouped];
+    _tableViewManager.tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    _tableViewManager.tableView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentAutomatic;
+    [self.view addSubview:_tableViewManager.tableView];
+
+    [self buildTable];
+}
+
+- (void)buildTable {
+    [_tableViewManager clearAllSection];
+
+    Class sectionCls = %c(WCTableViewSectionManager);
+    Class cellCls = %c(WCTableViewCellManager);
+
+    WCTableViewSectionManager *secMain = [sectionCls sectionWithHeader:@"广告拦截开关"];
+    DDAdBlockConfig *cfg = [DDAdBlockConfig sharedConfig];
+
+    [secMain addCell:[cellCls switchCellForSel:@selector(onMasterSwitch:)        target:self title:@"启用广告拦截"       on:cfg.master]];
+    [secMain addCell:[cellCls switchCellForSel:@selector(onMomentsSwitch:)      target:self title:@"屏蔽朋友圈广告"     on:cfg.moments]];
+    [secMain addCell:[cellCls switchCellForSel:@selector(onBrandSwitch:)        target:self title:@"屏蔽公众号广告"     on:cfg.brand]];
+    [secMain addCell:[cellCls switchCellForSel:@selector(onFinderSwitch:)       target:self title:@"屏蔽视频号广告"     on:cfg.finder]];
+    [secMain addCell:[cellCls switchCellForSel:@selector(onLiveSwitch:)         target:self title:@"屏蔽直播广告"       on:cfg.live]];
+    [secMain addCell:[cellCls switchCellForSel:@selector(onMiniProgramSwitch:)   target:self title:@"屏蔽小程序广告"     on:cfg.miniProgram]];
+
+    [_tableViewManager addSection:secMain];
+
+    WCTableViewSectionManager *secAdv = [sectionCls sectionWithHeader:@"进阶拦截"];
+    [secAdv addCell:[cellCls switchCellForSel:@selector(onNetworkSwitch:)       target:self title:@"网络层广告拦截"     on:cfg.network]];
+    [secAdv addCell:[cellCls switchCellForSel:@selector(onSearchSwitch:)        target:self title:@"屏蔽搜索广告"       on:cfg.search]];
+    [secAdv addCell:[cellCls switchCellForSel:@selector(onRewardedSwitch:)      target:self title:@"激励广告快速跳过"   on:cfg.rewardedFastPass]];
+    [secAdv addCell:[cellCls switchCellForSel:@selector(onTeenagerSwitch:)      target:self title:@"关闭青少年模式弹窗" on:cfg.teenagerPopup]];
+
+    [_tableViewManager addSection:secAdv];
+    [_tableViewManager reloadTableView];
+}
+
+- (void)onMasterSwitch:(UISwitch *)s        { [DDAdBlockConfig sharedConfig].master = s.isOn; }
+- (void)onMomentsSwitch:(UISwitch *)s       { [DDAdBlockConfig sharedConfig].moments = s.isOn; }
+- (void)onBrandSwitch:(UISwitch *)s         { [DDAdBlockConfig sharedConfig].brand = s.isOn; }
+- (void)onFinderSwitch:(UISwitch *)s        { [DDAdBlockConfig sharedConfig].finder = s.isOn; }
+- (void)onLiveSwitch:(UISwitch *)s          { [DDAdBlockConfig sharedConfig].live = s.isOn; }
+- (void)onMiniProgramSwitch:(UISwitch *)s   { [DDAdBlockConfig sharedConfig].miniProgram = s.isOn; }
+- (void)onNetworkSwitch:(UISwitch *)s       { [DDAdBlockConfig sharedConfig].network = s.isOn; }
+- (void)onSearchSwitch:(UISwitch *)s        { [DDAdBlockConfig sharedConfig].search = s.isOn; }
+- (void)onRewardedSwitch:(UISwitch *)s      { [DDAdBlockConfig sharedConfig].rewardedFastPass = s.isOn; }
+- (void)onTeenagerSwitch:(UISwitch *)s      { [DDAdBlockConfig sharedConfig].teenagerPopup = s.isOn; }
+
+@end
+
+// ========== 插件注册（参考 WechatNoAds） ==========
 %ctor {
     @autoreleasepool {
-        // %init 会展开所有 %hook 并注册到 Objective-C 运行时
-        %init;
+        Class mgrClass = NSClassFromString(@"WCPluginsMgr");
+        if (mgrClass) {
+            id mgr = [mgrClass sharedInstance];
+            if ([mgr respondsToSelector:@selector(registerControllerWithTitle:version:controller:)]) {
+                [mgr registerControllerWithTitle:@"DD广告拦截"
+                                         version:@"1.0.0"
+                                      controller:@"DDAdBlockSettingsViewController"];
+            }
+        }
     }
 }
