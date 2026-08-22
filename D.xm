@@ -290,8 +290,9 @@ static BOOL ddActive(void) { return [DDAdBlockConfig sharedConfig].master; }
 // 清位后同样判定“不展示广告”。清最低位（ad 位，对应 isExptNotShowAd）；其余 3 位已由上方
 // isExptNotShow* 强制 YES 覆盖，清错位也只会冗余抑制、不会误伤正常功能。
 - (unsigned int)exptShowOption {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].expt) return [%orig unsignedIntValue] & ~1U;
-    return %orig;
+    unsigned int v = %orig;
+    if (ddActive() && [DDAdBlockConfig sharedConfig].expt) return v & ~1U;
+    return v;
 }
 - (void)setExptShowOption:(unsigned int)arg1 {
     if (ddActive() && [DDAdBlockConfig sharedConfig].expt) { %orig(arg1 & ~1U); return; }
@@ -319,8 +320,9 @@ static BOOL ddActive(void) { return [DDAdBlockConfig sharedConfig].master; }
 // 对齐 WCR：BSTLExptConfig 同样声明 exptShowOption 位掩码属性，与 BrandTLExptConfig 同机制
 // （WCR 'BrandTLExptConfig exptShowOption ... (clear ad bit)' 同款清位逻辑）。清最低 ad 位。
 - (unsigned int)exptShowOption {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].expt) return [%orig unsignedIntValue] & ~1U;
-    return %orig;
+    unsigned int v = %orig;
+    if (ddActive() && [DDAdBlockConfig sharedConfig].expt) return v & ~1U;
+    return v;
 }
 - (void)setExptShowOption:(unsigned int)arg1 {
     if (ddActive() && [DDAdBlockConfig sharedConfig].expt) { %orig(arg1 & ~1U); return; }
