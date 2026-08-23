@@ -1,5 +1,5 @@
 //
-//  DD广告拦截 v1.5.3 — 微信广告拦截插件（单文件 Logos/Theos tweak）
+//  DD广告拦截 v1.5.4 — 微信广告拦截插件（单文件 Logos/Theos tweak）
 //  10 个开关，默认全部开启（对齐 WCR「装即全拦」行为）；每个 Hook 经总开关 + 分区开关双重门控。
 //  v1.4.0 视频号评论广告 + 视频号贴纸广告 + 视频号激励秒过加强（精确对齐 WCR + 微信 7.6）：
 //    1) 视频号评论广告 cell：WCFinderCommentAdTableViewCell 兜底隐藏（init 不返回 nil，防评论页闪退）
@@ -25,6 +25,15 @@
 //       对应视频里底部“向僵尸无限开炮 下载游戏”AppStore 内下载弹卡。
 //    4) 相关游戏推荐视图：WAJSEventHandler_showRelatedGamesView.handleJSEvent: → return
 //       对应相关游戏/下载游戏的推荐弹层入口，与 3) 互补。
+//  v1.5.4 修剩下的两种“漏广告/留空白”：
+//    1) 小程序高亮底部推广 banner：WAJSEventHandler_highlightBottomBanner.handleJSEvent: → return
+//       对应截图中用户红圈标注的“向僵尸开炮-尸潮来袭”/“不是哥们！这游戏居然还有这种玩法？”
+//       （带“广告”灰标的原生游戏推广卡片），是 openADCanvas 之外另一条原生广告 JS 桥入口。
+//    2) 评论广告“留空白占位”：WCFinderCommentAdTableViewCell.layoutUI → 短路（不调 %orig，直接 hidden=YES）
+//       + heightForMediaWithRatio:maxHeightPercentage:minArea: → return 0；让广告评论不再进入 layout 阶段。
+//    3) 视频号激励视频转屏控制：WCFinderRewardAdViewController.shouldAutorotate → NO
+//       + supportedInterfaceOrientations → UIInterfaceOrientationMaskPortrait，禁止激励界面旋转。
+//    4) 公众号画布卡片管理：BrandTLCanvasCardMgr.onServiceInit → return，对齐 WCR 4→4 hook 列表。
 //  v1.5.2 修复「视频号打开评论直接闪退」回归（v1.4.0 引入）：
 //    WCFinderCommentAdTableViewCell.initWithStyle:reuseIdentifier: 此前 return nil，UITableView 走注册类
 //    dequeue 拿到 nil 会抛 NSInternalInconsistencyException 崩溃。改为 init 永不返回 nil，updateWithModel
@@ -446,6 +455,11 @@ static BOOL ddActive(void) { return [DDAdBlockConfig sharedConfig].master; }
     if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return;
     %orig;
 }
+// v1.5.4 新增：对齐 WCR hook 列表（4→4）。service 初始化时即使被延迟注入也能拦住。
+- (void)onServiceInit {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return;
+    %orig;
+}
 %end
 
 // 广告内容解析层：返回 nil 即不生成广告
@@ -744,6 +758,20 @@ static NSString *DDAdBlockInjectJS(void) {
     }
     %orig;
 }
+// v1.5.4 新增：layoutUI 直接短路 → 广告评论的 layoutUI 不再跑，cell 永远 0 高度、不渲染，
+// 这是消除“评论广告没了但留空白占位”视觉残留的关键兜底（头文件显式声明了 - (void)layoutUI）。
+- (void)layoutUI {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].finder) {
+        ((UIView *)self).hidden = YES;
+        return; // 不调 %orig，让 cell 不进入真实布局
+    }
+    %orig;
+}
+// v1.5.4 新增：广告视频/图文区域高度直接归 0，从源头让 tableView 计算不出高度。
+- (double)heightForMediaWithRatio:(double)arg1 maxHeightPercentage:(long long)arg2 minArea:(unsigned long long)arg3 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return 0;
+    return %orig;
+}
 %end
 
 // 视频号贴纸广告 VC（feed 流广告 + 评论流广告均承载于此 VC 内部）
@@ -877,6 +905,18 @@ static NSString *DDAdBlockInjectJS(void) {
 // 头文件确认 WAJSEventHandler_openADCanvas 持有 WCAdvertiseInfo *adInfo，是小程序内原生广告画布入口。
 // 短路 handleJSEvent: 后整张广告画布不再渲染。
 %hook WAJSEventHandler_openADCanvas
+- (void)handleJSEvent:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
+    %orig;
+}
+%end
+
+// 游戏推广高亮底部 banner（v1.5.4 新增，对应视频里/用户截图里小程序内
+// “广告”灰标 + 游戏截图卡，例如“诡秘之主”、“向僵尸开炮-尸潮来袭”）。
+// 头文件确认 WAJSEventHandler_highlightBottomBanner - (void)handleJSEvent:(id)arg1，
+// 是小程序 WebView JS Bridge 调用另一条原生广告入口（与 openADCanvas 平行）。
+// 短路 → 整张推广 banner 不再渲染。
+%hook WAJSEventHandler_highlightBottomBanner
 - (void)handleJSEvent:(id)arg1 {
     if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
     %orig;
@@ -1237,6 +1277,16 @@ static BOOL DDAdBlockURLIsAdRequest(NSURL *url) {
     if (ddActive() && [DDAdBlockConfig sharedConfig].rewardedFastPass) return;
     %orig;
 }
+// v1.5.4 新增：对齐 WCR hook 列表（2→4），仅扩充转屏控制这两个安全钩子，不动 view 生命周期（避免误伤）。
+// 禁用自动转屏 + 强制竖屏方向，激励视频界面保持单一朝向，不让"全屏看广告"姿势生效。
+- (_Bool)shouldAutorotate {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].rewardedFastPass) return NO;
+    return %orig;
+}
+- (unsigned long long)supportedInterfaceOrientations {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].rewardedFastPass) return 1; // UIInterfaceOrientationMaskPortrait
+    return %orig;
+}
 %end
 
 // 视频号激励视频“30 秒后可获得奖励”按钮 view：倒计时数字与文案实际由它渲染。
@@ -1395,7 +1445,7 @@ static BOOL DDAdBlockURLIsAdRequest(NSURL *url) {
             id mgr = [mgrClass sharedInstance];
             if ([mgr respondsToSelector:@selector(registerControllerWithTitle:version:controller:)]) {
                 [mgr registerControllerWithTitle:@"DD广告拦截"
-                                         version:@"1.5.3"
+                                         version:@"1.5.4"
                                       controller:@"DDAdBlockSettingsViewController"];
             }
         }
