@@ -1,6 +1,17 @@
 //
-//  DD广告拦截 v1.2.9 — 微信广告拦截插件（单文件 Logos/Theos tweak）
+//  DD广告拦截 v1.3.0 — 微信广告拦截插件（单文件 Logos/Theos tweak）
 //  10 个开关，默认全部关闭；每个 Hook 经总开关 + 分区开关双重门控。
+//  v1.3.0 视频号激励视频秒过 + 小程序横幅广告视图拦截（精确对齐 WCR + 微信 7.6）：
+//    1) 视频号激励视频（wx.openChannelsRewardedVideoAd）：
+//       WAJSEventHandler_openChannelsRewardedVideoAd.handleJSEvent: 在 rewardedFastPass 开启时
+//         立即触发 onSuccessWithFeedBackInfo:rewardedDuration:（强制 30s），让小程序立刻发奖；
+//       onSuccessWithFeedBackInfo:rewardedDuration: 兜底强制 rewardDuration=30。
+//       配合 v1.2.7 的 WCFinderRewardAdViewController.adHasPlayOver→YES + startAdCountdownTimer 切断
+//       + WAJSEventHandler_adOperateWXData 透传 fastpass，构成完整 “视频不拉起、回调走通、小程序发奖” 链路。
+//    2) 小程序内横幅广告视图：
+//       WAWebviewBottomBannerView.initWithFrame: → nil（不创建横幅）
+//       WAWebviewHighlightedBottomBannerView.initWithFrame: → nil（不创建高亮横幅）
+//       与已有 WCFinderAdBannerView 互补，覆盖到小程序 WebView 内 “广告” cell 渲染层。
 //  v1.2.8 纯编译修复（CI 报错 “receiver type '_TtC6WeChat20/23MagicPlayableService' is a forward declaration”）：
 //    两处 [self notifyMiniProgramPlayableStatusWithIsEnd:YES] 改为 objc_msgSend 强转调用，
 //    绕开 Swift 前向声明类无法在编译期识别该方法的问题。逻辑与 v1.2.7 完全一致。
@@ -630,6 +641,24 @@ static NSString *DDAdBlockInjectJS(void) {
 }
 %end
 
+// 小程序内横幅广告视图（与 WCFinderAdBannerView 互补，覆盖到小程序 WebView 渲染层）。
+// 微信7.6 头文件确认 WAWebviewBottomBannerView : UIView、WAWebviewHighlightedBottomBannerView : UIButton
+// 是承载“广告”小标签 + 推广标题 + 跳转按钮的原生 View 类（class-dump 53286 个头文件筛得）。
+// 初始化阶段直接返回 nil，整条横幅永不渲染，避免消费广告位导致“网络连接失败”类副作用。
+%hook WAWebviewBottomBannerView
+- (id)initWithFrame:(struct CGRect)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return nil;
+    return %orig;
+}
+%end
+
+%hook WAWebviewHighlightedBottomBannerView
+- (id)initWithFrame:(struct CGRect)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return nil;
+    return %orig;
+}
+%end
+
 // ========== 4. 小程序广告（多入口全覆盖）[WCR: enhancedAdBlockMiniProgramEnabled] ==========
 // 微信小程序广告（开屏 + 横幅/插屏 + 广告推送消息）在原生层拦截，不注入 WebView
 // （注入会误伤正常请求、产生“网络连接失败”，且 display:none 不停音频/卡顿）。
@@ -1055,6 +1084,31 @@ static BOOL DDAdBlockURLIsAdRequest(NSURL *url) {
 }
 %end
 
+// 视频号激励视频（wx.openChannelsRewardedVideoAd）秒过。
+// WCR selrefs 含 setEnhancedAdBlockRewardedAdFastPassEnabled:，但未显式 hook 该 handler，
+// 本实现按 WCR `WCRefineEnhancedAdBlockRewardedAdFastPassEnabled` flag 的语义补齐：handleJSEvent: 接
+// JS 请求后立即调 onSuccessWithFeedBackInfo:rewardedDuration: 让小程序立刻获得奖励；
+// onSuccessWithFeedBackInfo:rewardedDuration: 同步兜底强制 rewardDuration=30。
+%hook WAJSEventHandler_openChannelsRewardedVideoAd
+- (void)handleJSEvent:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].rewardedFastPass) {
+        %orig(arg1);
+        // 前向声明类：原生侧已完成 handleJSEvent 处理，用 objc_msgSend 触发结束回调
+        SEL _sel = NSSelectorFromString(@"onSuccessWithFeedBackInfo:rewardedDuration:");
+        if (_sel) ((void (*)(id, SEL, id, unsigned int))objc_msgSend)((id)self, _sel, nil, (unsigned int)30);
+        return;
+    }
+    %orig;
+}
+- (void)onSuccessWithFeedBackInfo:(id)arg1 rewardedDuration:(unsigned int)arg2 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].rewardedFastPass) {
+        %orig(arg1, (unsigned int)30);
+        return;
+    }
+    %orig;
+}
+%end
+
 
 // ========== 9. 广告曝光上报抑制（Hook: WCAdvertiseStatMgr，归总开关） ==========
 %hook WCAdvertiseStatMgr
@@ -1165,7 +1219,7 @@ static BOOL DDAdBlockURLIsAdRequest(NSURL *url) {
             id mgr = [mgrClass sharedInstance];
             if ([mgr respondsToSelector:@selector(registerControllerWithTitle:version:controller:)]) {
                 [mgr registerControllerWithTitle:@"DD广告拦截"
-                                         version:@"1.2.9"
+                                         version:@"1.3.0"
                                       controller:@"DDAdBlockSettingsViewController"];
             }
         }
