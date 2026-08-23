@@ -1,6 +1,25 @@
 //
-//  DD广告拦截 v1.2.6 — 微信广告拦截插件（单文件 Logos/Theos tweak）
+//  DD广告拦截 v1.2.7 — 微信广告拦截插件（单文件 Logos/Theos tweak）
 //  11 个开关，默认全部关闭；每个 Hook 经总开关 + 分区开关双重门控。
+//  v1.2.7 修对齐（再反汇编 WCR + 微信 7.6）：
+//    1) 试玩广告（PlayableAd / “试玩 19 秒获得奖励”）秒过：
+//       _TtC6WeChat20MagicPlayableService + _TtC6WeChat23MagicNewPlayableService
+//       - startWithConfig: 后立即 notifyMiniProgramPlayableStatusWithIsEnd:YES
+//       - notifyMiniProgramPlayableStatusWithIsEnd: 兜底强制 YES
+//       对齐 WCR：__cstring 'MagicPlayableService.startWithConfig' / 'MagicNewPlayableService.startWithConfig'
+//         + selrefs 'notifyMiniProgramPlayableStatusWithIsEnd:' / 'isPlayable'
+//    2) 试玩广告生命周期 JS 桥（7 个 Swift 事件桥）全部短路：
+//       _TtC6WeChat46/49 WAJSEventHandler_update/remove/insertMiniProgramPlayableView(New)
+//       _TtC6WeChat46 MPEventHandler_notifyMiniProgramPlayableStatus
+//       _TtC6WeChat49 MBEventHandler_notifyMiniProgramPlayableStatusNew
+//    3) 激励视频秒过修复：
+//       - 移除 WCFinderRewardAdViewController.viewDidLoad 空实现（破坏 adHasPlayOver 传递链）
+//       - 改 hook startAdCountdownTimer 直接 return 掐断视频倒计时
+//       - WAJSEventHandler_adOperateWXData.handleJSEvent: 在 rewardedFastPass 开启时放行
+//         （fastpass 标志必须透传，否则小程序不发奖）
+//       - rewardedFastPass 默认值改 YES（开箱即用秒过）
+//    4) 视频号广告 banner 视图（WCFinderAdBannerView）init 返回 nil，不再渲染“广告”横条。
+//    v1.2.6 修微信 7.6 兼容性：internalGetAdInfoFromCacheWithPosId → getCachedAdInfoForPosId（MagicAdCommonService 已改名）。
 //  开关命名对齐 WCR（WCRefine）的 enhancedAdBlock*Enabled 模块：moments/brand/finder/live/
 //  miniProgram/network/search/rewardedAdFastPass/expt + 独立 disableTeenagerPopupEnabled。
 //  全部 Hook 落点经 WCR 反汇编精确核对（__cstring 说明字符串 + __objc_selrefs 双重证据）：
@@ -93,7 +112,7 @@ static NSString * const kDDAdBlockExptKey              = @"DDAdBlock_EnhancedAdB
         if ([ud objectForKey:kDDAdBlockMiniProgramKey]      == nil) [ud setBool:NO forKey:kDDAdBlockMiniProgramKey];
         if ([ud objectForKey:kDDAdBlockNetworkKey]          == nil) [ud setBool:NO forKey:kDDAdBlockNetworkKey];
         if ([ud objectForKey:kDDAdBlockSearchKey]           == nil) [ud setBool:NO forKey:kDDAdBlockSearchKey];
-        if ([ud objectForKey:kDDAdBlockRewardedFastPassKey] == nil) [ud setBool:NO forKey:kDDAdBlockRewardedFastPassKey];
+        if ([ud objectForKey:kDDAdBlockRewardedFastPassKey] == nil) [ud setBool:YES forKey:kDDAdBlockRewardedFastPassKey];
         if ([ud objectForKey:kDDAdBlockTeenagerPopupKey]    == nil) [ud setBool:NO forKey:kDDAdBlockTeenagerPopupKey];
         if ([ud objectForKey:kDDAdBlockExptKey]             == nil) [ud setBool:NO forKey:kDDAdBlockExptKey];
 
@@ -606,6 +625,15 @@ static NSString *DDAdBlockInjectJS(void) {
 }
 %end
 
+// 视频号广告 banner 视图：截断“广告”标识+跳转链接的渲染。WCR 在 WCFinderAdBannerView 上 hook，
+// 头像边或卡片顶部带“广告”标识的横条全部不渲染。
+%hook WCFinderAdBannerView
+- (id)initWithFrame:(struct CGRect)arg1 jumpInfo:(id)arg2 enableClick:(BOOL)arg3 disableIconColor:(id)arg4 disableTextColor:(id)arg5 iconSize:(struct CGSize)arg6 textFont:(id)arg7 delegate:(id)arg8 textNormalColor:(id)arg9 adLabelColor:(id)arg10 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return nil;
+    return %orig;
+}
+%end
+
 // ========== 4. 小程序广告（多入口全覆盖）[WCR: enhancedAdBlockMiniProgramEnabled] ==========
 // 微信小程序广告（开屏 + 横幅/插屏 + 广告推送消息）在原生层拦截，不注入 WebView
 // （注入会误伤正常请求、产生“网络连接失败”，且 display:none 不停音频/卡顿）。
@@ -701,10 +729,20 @@ static NSString *DDAdBlockInjectJS(void) {
 }
 %end
 
-// 广告操作数据 JS 事件处理器：adOperateWXData 的请求/响应数据全部清空（对齐 WCR 4 个落点）。
+// 广告操作数据 JS 事件处理器：adOperateWXData 的请求/响应数据清空（对齐 WCR 4 个落点）。
+// 【特别说明】handleJSEvent: 是小程序向微信注入“激励已看完”等业务回调的唯一入口。
+// 当 rewardedFastPass 开启时，必须放行该事件（携带 fastpass=1 让小程序立刻发奖），
+// 否则激励秒过会因回调被掐断而失败（表现为“点完不结算”）。
 %hook WAJSEventHandler_adOperateWXData
 - (void)handleJSEvent:(id)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) {
+        // 放行激励秒过的回调通道（不再拦截）
+        if ([DDAdBlockConfig sharedConfig].rewardedFastPass) {
+            %orig;
+            return;
+        }
+        return;
+    }
     %orig;
 }
 - (void)endCancel {
@@ -716,6 +754,99 @@ static NSString *DDAdBlockInjectJS(void) {
     %orig;
 }
 - (void)onResponseData:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
+    %orig;
+}
+%end
+
+// 试玩广告（PlayableAd / “试玩 19 秒获得奖励”）秒过（精确对齐 WCR：
+// __cstring 描述串 'MagicPlayableService.startWithConfig' / 'MagicNewPlayableService.startWithConfig'
+// + __objc_selrefs 'notifyMiniProgramPlayableStatusWithIsEnd:' / 'isPlayable'）。
+// 启动后立即 notifyMiniProgramPlayableStatusWithIsEnd:YES，让小程序运行时认为试玩已结束并立刻发奖，
+// 不再等待 19 秒试玩。notifyMiniProgramPlayableStatusWithIsEnd: 兜底强制 YES，应对 startWithConfig 漏触发场景。
+%hook _TtC6WeChat20MagicPlayableService
+- (void)startWithConfig:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) {
+        %orig(arg1);
+        [self notifyMiniProgramPlayableStatusWithIsEnd:YES];
+        return;
+    }
+    %orig;
+}
+- (void)notifyMiniProgramPlayableStatusWithIsEnd:(BOOL)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) {
+        %orig(YES);
+        return;
+    }
+    %orig;
+}
+%end
+
+%hook _TtC6WeChat23MagicNewPlayableService
+- (void)startWithConfig:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) {
+        %orig(arg1);
+        [self notifyMiniProgramPlayableStatusWithIsEnd:YES];
+        return;
+    }
+    %orig;
+}
+- (void)notifyMiniProgramPlayableStatusWithIsEnd:(BOOL)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) {
+        %orig(YES);
+        return;
+    }
+    %orig;
+}
+%end
+
+// 试玩广告生命周期 JS 桥：插入/更新/移除试玩视图的事件全部清空
+// （selrefs 中 WCR 对应的 _TtC6WeChat* 系列 Swift 事件桥）。即使 PlayableService hook 未触发，
+// JS 层也不会再创建试玩视图渲染。
+%hook _TtC6WeChat46WAJSEventHandler_updateMiniProgramPlayableView
+- (void)handleJSEvent:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
+    %orig;
+}
+%end
+
+%hook _TtC6WeChat49WAJSEventHandler_updateMiniProgramPlayableViewNew
+- (void)handleJSEvent:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
+    %orig;
+}
+%end
+
+%hook _TtC6WeChat46WAJSEventHandler_removeMiniProgramPlayableView
+- (void)handleJSEvent:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
+    %orig;
+}
+%end
+
+%hook _TtC6WeChat49WAJSEventHandler_removeMiniProgramPlayableViewNew
+- (void)handleJSEvent:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
+    %orig;
+}
+%end
+
+%hook _TtC6WeChat49WAJSEventHandler_insertMiniProgramPlayableViewNew
+- (void)handleJSEvent:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
+    %orig;
+}
+%end
+
+%hook _TtC6WeChat46MPEventHandler_notifyMiniProgramPlayableStatus
+- (void)invoke:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
+    %orig;
+}
+%end
+
+%hook _TtC6WeChat49MBEventHandler_notifyMiniProgramPlayableStatusNew
+- (void)invoke:(id)arg1 {
     if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
     %orig;
 }
@@ -911,17 +1042,14 @@ static BOOL DDAdBlockURLIsAdRequest(NSURL *url) {
 
 // ========== 7. 激励广告快速过（精确对齐 WCR：adHasPlayOver + viewDidLoad）[WCR: enhancedAdBlockRewardedAdFastPassEnabled] ==========
 %hook WCFinderRewardAdViewController
-// 让系统认为激励视频已播放完毕，跳过倒计时/等待并触发奖励结算（WCR 同款核心）
+// 让系统认为激励视频已播放完毕，跳过倒计时/等待并触发奖励结算（WCR 同款核心：selrefs 中唯一 adHasPlayOver）
 - (BOOL)adHasPlayOver {
     if (ddActive() && [DDAdBlockConfig sharedConfig].rewardedFastPass) return YES;
     return %orig;
 }
-// WCR 精确落点：viewDidLoad 空实现 → 进入激励页时不初始化视频/倒计时/数据加载，
-// 配合 adHasPlayOver 返回 YES 即“无界面、无声音、真正秒过”，且不触发视频网络请求，
-// 不会出现“网络未连接”。
-// 注：WCR 不 hook viewWillAppear/viewDidAppear（该 VC 由导航栈 push，dismiss 无效），
-// 也不 hook 网络层去拦激励视频，避免误伤激励请求导致“网络未连接”。
-- (void)viewDidLoad {
+// 不再空实现 viewDidLoad（VC 由导航 push 而非 present，空 viewDidLoad 会破坏 adHasPlayOver 传递链），
+// 改为精准掐断倒计时定时器：视频还未拉起就被立即停掉，配合 adHasPlayOver→YES 形成“无界面、无声音、秒过”。
+- (void)startAdCountdownTimer {
     if (ddActive() && [DDAdBlockConfig sharedConfig].rewardedFastPass) return;
     %orig;
 }
@@ -1054,7 +1182,7 @@ static BOOL DDAdBlockURLIsAdRequest(NSURL *url) {
             id mgr = [mgrClass sharedInstance];
             if ([mgr respondsToSelector:@selector(registerControllerWithTitle:version:controller:)]) {
                 [mgr registerControllerWithTitle:@"DD广告拦截"
-                                         version:@"1.2.6"
+                                         version:@"1.2.7"
                                       controller:@"DDAdBlockSettingsViewController"];
             }
         }
