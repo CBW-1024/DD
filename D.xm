@@ -1,6 +1,27 @@
 //
-//  DD广告拦截 v1.3.0 — 微信广告拦截插件（单文件 Logos/Theos tweak）
-//  10 个开关，默认全部关闭；每个 Hook 经总开关 + 分区开关双重门控。
+//  DD广告拦截 v1.5.0 — 微信广告拦截插件（单文件 Logos/Theos tweak）
+//  10 个开关，默认全部开启（对齐 WCR「装即全拦」行为）；每个 Hook 经总开关 + 分区开关双重门控。
+//  v1.4.0 视频号评论广告 + 视频号贴纸广告 + 视频号激励秒过加强（精确对齐 WCR + 微信 7.6）：
+//    1) 视频号评论广告 cell：WCFinderCommentAdTableViewCell.initWithStyle:reuseIdentifier: → nil
+//       + updateWithModel:width: → return（防已复用 cell）。覆盖视频评论区里插入的“广告”推广 cell。
+//    2) 视频号贴纸广告：WCFinderFeedStickerAdViewController.initWithParam: → nil
+//       + WCFinderFeedInlineStickerAdView.initWithFrame: → nil
+//       + WCFinderInlineStickerAdGestureBlockingView.initWithFrame: → nil
+//       覆盖视频号播放中右下角的“了解详情”贴纸广告及评论流广告容器。
+//    3) 视频号激励视频秒过加强（v1.3.0 漏掉的根因）：
+//       “30 秒后可获得奖励”按钮实际由 WCFinderAdPromotionButton 渲染（而非 WCFinderRewardAdViewController
+//       自带倒计时）。setCountdown: / setRemainingSeconds: 强制设为 0，按钮立即进入可点击完成状态。
+//       与 WCFinderRewardAdViewController.adHasPlayOver→YES + startAdCountdownTimer 切断 + WAJSEventHandler
+//       _adOperateWXData 透传 fastpass + WAJSEventHandler_openChannelsRewardedVideoAd.onSuccess 协同。
+//    4) 小程序 banner 加固：WAWebviewBottomBannerView 新增 layoutSubviews（frame=zero, hidden=YES）
+//       + reloadData（return）双重兜底，确保即使 init 被复用场景也完全不渲染。
+//  v1.5.0 对齐 WCR「默认全开 + 调用方法」：
+//    1) 默认开关全部开启（master/moments/brand/finder/live/miniProgram/network/search/expt/rewardedFastPass）
+//       —— 此前 DD 默认全关（仅 rewardedFastPass 默认开），与 WCR「装即全拦」行为相反，是实测仍见广告的根因。
+//    2) 补齐 WCR 引用但 DD 漏 hook 的 5 个方法（经与 DD 现有实现逐对核验，其余均已被覆盖，此前 gap 分析多为误报）：
+//       BrandAdDataParser +bizTypeForAdInfoDic:/+traceIdForAdInfoDic: -> 返回 nil（清空广告 bizType/traceId 追踪）
+//       BrandTLFlutterViewController -reportAdBrandCardOnClick -> 不执行上报；-initWithExptConfig: -> 返回 nil
+//       MagicPlayableService/-MagicNewPlayableService -onCanvasViewFirstFrameRendered: -> 拦截（试玩 canvas 不渲染）
 //  v1.3.0 视频号激励视频秒过 + 小程序横幅广告视图拦截（精确对齐 WCR + 微信 7.6）：
 //    1) 视频号激励视频（wx.openChannelsRewardedVideoAd）：
 //       WAJSEventHandler_openChannelsRewardedVideoAd.handleJSEvent: 在 rewardedFastPass 开启时
@@ -117,17 +138,17 @@ static NSString * const kDDAdBlockExptKey              = @"DDAdBlock_EnhancedAdB
 - (instancetype)init {
     if (self = [super init]) {
         NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-        // 默认全部关闭，需在设置内手动开启
-        if ([ud objectForKey:kDDAdBlockMasterKey]           == nil) [ud setBool:NO forKey:kDDAdBlockMasterKey];
-        if ([ud objectForKey:kDDAdBlockMomentsKey]          == nil) [ud setBool:NO forKey:kDDAdBlockMomentsKey];
-        if ([ud objectForKey:kDDAdBlockBrandKey]            == nil) [ud setBool:NO forKey:kDDAdBlockBrandKey];
-        if ([ud objectForKey:kDDAdBlockFinderKey]           == nil) [ud setBool:NO forKey:kDDAdBlockFinderKey];
-        if ([ud objectForKey:kDDAdBlockLiveKey]             == nil) [ud setBool:NO forKey:kDDAdBlockLiveKey];
-        if ([ud objectForKey:kDDAdBlockMiniProgramKey]      == nil) [ud setBool:NO forKey:kDDAdBlockMiniProgramKey];
-        if ([ud objectForKey:kDDAdBlockNetworkKey]          == nil) [ud setBool:NO forKey:kDDAdBlockNetworkKey];
-        if ([ud objectForKey:kDDAdBlockSearchKey]           == nil) [ud setBool:NO forKey:kDDAdBlockSearchKey];
+        // 默认全部开启（对齐 WCR 默认全开行为，装即生效）
+        if ([ud objectForKey:kDDAdBlockMasterKey]           == nil) [ud setBool:YES forKey:kDDAdBlockMasterKey];
+        if ([ud objectForKey:kDDAdBlockMomentsKey]          == nil) [ud setBool:YES forKey:kDDAdBlockMomentsKey];
+        if ([ud objectForKey:kDDAdBlockBrandKey]            == nil) [ud setBool:YES forKey:kDDAdBlockBrandKey];
+        if ([ud objectForKey:kDDAdBlockFinderKey]           == nil) [ud setBool:YES forKey:kDDAdBlockFinderKey];
+        if ([ud objectForKey:kDDAdBlockLiveKey]             == nil) [ud setBool:YES forKey:kDDAdBlockLiveKey];
+        if ([ud objectForKey:kDDAdBlockMiniProgramKey]      == nil) [ud setBool:YES forKey:kDDAdBlockMiniProgramKey];
+        if ([ud objectForKey:kDDAdBlockNetworkKey]          == nil) [ud setBool:YES forKey:kDDAdBlockNetworkKey];
+        if ([ud objectForKey:kDDAdBlockSearchKey]           == nil) [ud setBool:YES forKey:kDDAdBlockSearchKey];
         if ([ud objectForKey:kDDAdBlockRewardedFastPassKey] == nil) [ud setBool:YES forKey:kDDAdBlockRewardedFastPassKey];
-        if ([ud objectForKey:kDDAdBlockExptKey]             == nil) [ud setBool:NO forKey:kDDAdBlockExptKey];
+        if ([ud objectForKey:kDDAdBlockExptKey]             == nil) [ud setBool:YES forKey:kDDAdBlockExptKey];
 
         _master           = [ud boolForKey:kDDAdBlockMasterKey];
         _moments          = [ud boolForKey:kDDAdBlockMomentsKey];
@@ -427,6 +448,14 @@ static BOOL ddActive(void) { return [DDAdBlockConfig sharedConfig].master; }
     if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return nil;
     return %orig;
 }
++ (id)bizTypeForAdInfoDic:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return nil;
+    return %orig;
+}
++ (id)traceIdForAdInfoDic:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return nil;
+    return %orig;
+}
 %end
 
 // 广告 XML 解析/注入层（对齐 WCR：WCR 字符串精确引用 WCAdXmlParser 的
@@ -523,6 +552,14 @@ static BOOL ddActive(void) { return [DDAdBlockConfig sharedConfig].master; }
     // WCR 'setEnableAd:%d -> force NO'：无论传入什么都强制 NO，且不调用原实现（避免递归）。
     if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return;
     %orig;
+}
+- (void)reportAdBrandCardOnClick {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return;
+    %orig;
+}
+- (id)initWithExptConfig:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return nil;
+    return %orig;
 }
 %end
 
@@ -644,17 +681,65 @@ static NSString *DDAdBlockInjectJS(void) {
 // 小程序内横幅广告视图（与 WCFinderAdBannerView 互补，覆盖到小程序 WebView 渲染层）。
 // 微信7.6 头文件确认 WAWebviewBottomBannerView : UIView、WAWebviewHighlightedBottomBannerView : UIButton
 // 是承载“广告”小标签 + 推广标题 + 跳转按钮的原生 View 类（class-dump 53286 个头文件筛得）。
-// 初始化阶段直接返回 nil，整条横幅永不渲染，避免消费广告位导致“网络连接失败”类副作用。
+// 初始化阶段直接返回 nil，整条横幅永不渲染；layoutSubviews/reloadData 多重兜底（防 init 被复用场景）。
 %hook WAWebviewBottomBannerView
 - (id)initWithFrame:(struct CGRect)arg1 {
     if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return nil;
     return %orig;
+}
+- (void)layoutSubviews {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) {
+        self.frame = CGRectZero;
+        self.hidden = YES;
+        return;
+    }
+    %orig;
+}
+- (void)reloadData {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
+    %orig;
 }
 %end
 
 %hook WAWebviewHighlightedBottomBannerView
 - (id)initWithFrame:(struct CGRect)arg1 {
     if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return nil;
+    return %orig;
+}
+%end
+
+// 视频号评论流中的广告 cell（v1.4.0 新增，覆盖图1 “评论 5354” 下方的岚图梦想家广告 cell）。
+// WCR cstring/selrefs 未显式 hook 该 cell，WCR 靠“评论流不返回广告数据”间接处理；本 tweak
+// 在原生层兜底：init 不创建 + updateWithModel 不更新，双保险。
+%hook WCFinderCommentAdTableViewCell
+- (id)initWithStyle:(long long)arg1 reuseIdentifier:(id)arg2 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return nil;
+    return %orig;
+}
+- (void)updateWithModel:(id)arg1 width:(double)arg2 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return;
+    %orig;
+}
+%end
+
+// 视频号贴纸广告 VC（feed 流广告 + 评论流广告均承载于此 VC 内部）
+%hook WCFinderFeedStickerAdViewController
+- (id)initWithParam:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return nil;
+    return %orig;
+}
+%end
+
+%hook WCFinderFeedInlineStickerAdView
+- (id)initWithFrame:(struct CGRect)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return nil;
+    return %orig;
+}
+%end
+
+%hook WCFinderInlineStickerAdGestureBlockingView
+- (id)initWithFrame:(struct CGRect)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return nil;
     return %orig;
 }
 %end
@@ -807,6 +892,10 @@ static NSString *DDAdBlockInjectJS(void) {
     }
     %orig;
 }
+- (void)onCanvasViewFirstFrameRendered:(unsigned int)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
+    %orig;
+}
 %end
 
 %hook _TtC6WeChat23MagicNewPlayableService
@@ -825,6 +914,10 @@ static NSString *DDAdBlockInjectJS(void) {
         %orig(YES);
         return;
     }
+    %orig;
+}
+- (void)onCanvasViewFirstFrameRendered:(unsigned int)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
     %orig;
 }
 %end
@@ -1084,6 +1177,27 @@ static BOOL DDAdBlockURLIsAdRequest(NSURL *url) {
 }
 %end
 
+// 视频号激励视频“30 秒后可获得奖励”按钮 view：倒计时数字与文案实际由它渲染。
+// 即使 WCFinderRewardAdViewController.adHasPlayOver=YES 已被原生层识别，若倒计时数字仍在跑，
+// UI 上仍显示“30秒后可获得奖励”造成“未秒过”的视觉。强制 setCountdown: 拦截为 0，让按钮立即进入
+// 可点击完成状态，与 WCFinderRewardAdViewController 链路协同。
+%hook WCFinderAdPromotionButton
+- (void)setCountdown:(long long)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].rewardedFastPass) {
+        %orig((long long)0);
+        return;
+    }
+    %orig;
+}
+- (void)setRemainingSeconds:(long long)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].rewardedFastPass) {
+        %orig((long long)0);
+        return;
+    }
+    %orig;
+}
+%end
+
 // 视频号激励视频（wx.openChannelsRewardedVideoAd）秒过。
 // WCR selrefs 含 setEnhancedAdBlockRewardedAdFastPassEnabled:，但未显式 hook 该 handler，
 // 本实现按 WCR `WCRefineEnhancedAdBlockRewardedAdFastPassEnabled` flag 的语义补齐：handleJSEvent: 接
@@ -1219,7 +1333,7 @@ static BOOL DDAdBlockURLIsAdRequest(NSURL *url) {
             id mgr = [mgrClass sharedInstance];
             if ([mgr respondsToSelector:@selector(registerControllerWithTitle:version:controller:)]) {
                 [mgr registerControllerWithTitle:@"DD广告拦截"
-                                         version:@"1.3.0"
+                                         version:@"1.5.0"
                                       controller:@"DDAdBlockSettingsViewController"];
             }
         }
