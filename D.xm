@@ -1,5 +1,5 @@
 //
-//  DD广告拦截 v1.5.5 — 微信广告拦截插件（单文件 Logos/Theos tweak）
+//  DD广告拦截 v1.5.6 — 微信广告拦截插件（单文件 Logos/Theos tweak）
 //  10 个开关，默认全部开启（对齐 WCR「装即全拦」行为）；每个 Hook 经总开关 + 分区开关双重门控。
 //  v1.4.0 视频号评论广告 + 视频号贴纸广告 + 视频号激励秒过加强（精确对齐 WCR + 微信 7.6）：
 //    1) 视频号评论广告 cell：WCFinderCommentAdTableViewCell.init 不返回 nil（避免 UITableView dequeue nil 闪退）。
@@ -26,9 +26,21 @@
 //       正确做法是回到 v1.5.0 已有的 WCFinderComment 数据层 neutralize（已有 3 个属性）。
 //    3) WCFinderRewardAdViewController.shouldAutorotate / supportedInterfaceOrientations、
 //       BrandTLCanvasCardMgr.onServiceInit 这几个"凑数 hook"也回退，跟广告拦截无关。
-//    4) 保留 WAJSEventHandler_showSplashAd / showSplashAdMenu / adOperateWXData 这 3 个 JS 桥 hook：
-//       WCR cstring 也包含对应描述（"showSplashAd" / "showSplashAdMenu" / "adOperateWXData"），
-//       它们只针对"开屏广告展示"和"广告数据透传"，不误伤业务回调。
+//    4) 保留 WAJSEventHandler_showSplashAd / showSplashAdMenu 这 2 个 JS 桥 hook，
+//       它们只针对"开屏广告展示"，不误伤业务回调。
+//  v1.5.6 修 v1.5.5 残留的"网络连接失败"+"激励广告不秒过"：
+//    1) 误把 WAJSEventHandler_adOperateWXData（无关业务回调类，与广告上报无关）当成广告数据上报拦截，
+//       导致 v1.5.5 在 miniProgram 开关下"return;" 截断了所有小程序业务数据上报 → "网络连接失败"。
+//       v1.5.6 彻底删除该 hook 整块；真正的"广告数据上报"由 v1.5.0 已有的 WebviewJSEventHandler_* 落点负责：
+//       - WebviewJSEventHandler_adDataReport.handleJSEvent:HandlerFacade:ExtraData: → return
+//         （WCR cstring 'WebviewJSEventHandler_adDataReport blocked'）
+//       - WebviewJSEventHandler_getAdIdInfo.handleJSEvent:HandlerFacade:ExtraData: → return
+//         + checkUrlValid → NO
+//         （WCR cstring 'WebviewJSEventHandler_getAdIdInfo blocked'）
+//       这两个 hook v1.5.0 已存在但仅受 brand 开关控制；v1.5.6 改为 brand+miniProgram+network 三开关并生效。
+//    2) 加回 WAJSEventHandler_showGameRewardsCapsuleBanner.handleJSEvent: → return，
+//       仅在 rewardedFastPass 开启时拦截（默认开启）——这是 v1.5.5 误删的"30秒后可获得奖励"按钮限时变可点入口。
+//       关闭 rewardedFastPass 时完全放行，不影响"看广告得奖励"业务。
 
 //    WCFinderCommentAdTableViewCell.initWithStyle:reuseIdentifier: 此前 return nil，UITableView 走注册类
 //    dequeue 拿到 nil 会抛 NSInternalInconsistencyException 崩溃。改为 init 永不返回 nil，updateWithModel
@@ -50,7 +62,7 @@
 //         立即触发 onSuccessWithFeedBackInfo:rewardedDuration:（强制 30s），让小程序立刻发奖；
 //       onSuccessWithFeedBackInfo:rewardedDuration: 兜底强制 rewardDuration=30。
 //       配合 v1.2.7 的 WCFinderRewardAdViewController.adHasPlayOver→YES + startAdCountdownTimer 切断
-//       + WAJSEventHandler_adOperateWXData 透传 fastpass，构成完整 “视频不拉起、回调走通、小程序发奖” 链路。
+//       + WAJSEventHandler_openChannelsRewardedVideoAd.onSuccess 协同。
 //    2) 小程序内横幅广告视图：
 //       WAWebviewBottomBannerView.initWithFrame: → nil（不创建横幅）
 //       WAWebviewHighlightedBottomBannerView.initWithFrame: → nil（不创建高亮横幅）
@@ -74,8 +86,6 @@
 //    3) 激励视频秒过修复：
 //       - 移除 WCFinderRewardAdViewController.viewDidLoad 空实现（破坏 adHasPlayOver 传递链）
 //       - 改 hook startAdCountdownTimer 直接 return 掐断视频倒计时
-//       - WAJSEventHandler_adOperateWXData.handleJSEvent: 在 rewardedFastPass 开启时放行
-//         （fastpass 标志必须透传，否则小程序不发奖）
 //       - rewardedFastPass 默认值改 YES（开箱即用秒过）
 //    4) 视频号广告 banner 视图（WCFinderAdBannerView）init 返回 nil，不再渲染“广告”横条。
 //    v1.2.6 修微信 7.6 兼容性：internalGetAdInfoFromCacheWithPosId → getCachedAdInfoForPosId（MagicAdCommonService 已改名）。
@@ -549,16 +559,21 @@ static BOOL ddActive(void) { return [DDAdBlockConfig sharedConfig].master; }
 
 %hook WebviewJSEventHandler_getAdIdInfo
 - (BOOL)checkUrlValid {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return NO;
+    // 跨场景拦截：公众号/小程序广告 SDK 取 adId 时让 URL 校验失败，广告请求落地失败
+    if (ddActive() && ([DDAdBlockConfig sharedConfig].brand ||
+                       [DDAdBlockConfig sharedConfig].miniProgram ||
+                       [DDAdBlockConfig sharedConfig].network)) return NO;
     return %orig;
 }
 %end
 
 // WCR 精确落点（__cstring 'WebviewJSEventHandler_adDataReport blocked'）：
-// 公众号广告数据上报 JS 桥，空实现 → 广告上报被阻断，广告不统计不落地。
+// 广告数据上报 JS 桥（公众号 + 小程序共用），空实现 → 广告上报被阻断，广告不统计不落地。
 %hook WebviewJSEventHandler_adDataReport
 - (void)handleJSEvent:(id)arg1 HandlerFacade:(id)arg2 ExtraData:(id)arg3 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return;
+    if (ddActive() && ([DDAdBlockConfig sharedConfig].brand ||
+                       [DDAdBlockConfig sharedConfig].miniProgram ||
+                       [DDAdBlockConfig sharedConfig].network)) return;
     %orig;
 }
 %end
@@ -783,8 +798,11 @@ static NSString *DDAdBlockInjectJS(void) {
 //        （'WASplashADWindow skip showRootViewController'）+ initWithFrame: nil 双保险
 //      - WAJSEventHandler_showSplashAd / _showSplashAdMenu  short-circuit
 //        （'showSplashAd short-circuit' / 'showSplashAdMenu short-circuit'）
-//      - WAJSEventHandler_adOperateWXData（handleJSEvent/endCancel/endOKWithData:/onResponseData:）
-//   2) 横幅/插屏广告“数据拉取层”（实测确认的真实数据入口）：
+//      - WebviewJSEventHandler_adDataReport.handleJSEvent:HandlerFacade:ExtraData: → return
+//        （'WebviewJSEventHandler_adDataReport blocked'）
+//      - WebviewJSEventHandler_getAdIdInfo.checkUrlValid → NO + handleJSEvent: 三参 → return
+//        （'WebviewJSEventHandler_getAdIdInfo blocked'）
+//   2) 横幅/插屏广告"数据拉取层"（实测确认的真实数据入口）：
 //      - MagicAdCGIMgr.getAdsCGIWithPosIds: → 不发 CGI
 //      - MagicAdCommonService.getAdInfoWithPosId: → nil / getAdInfoAsyncWithPosId: → 拦截
 //   3) 插屏/横幅“展示服务层”（Swift，按实测补强）：
@@ -857,36 +875,6 @@ static NSString *DDAdBlockInjectJS(void) {
 // 开屏广告“菜单”JS 事件处理器：菜单触发同样丢弃。
 %hook WAJSEventHandler_showSplashAdMenu
 - (void)handleJSEvent:(id)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
-    %orig;
-}
-%end
-
-// 广告操作数据 JS 事件处理器：adOperateWXData 的请求/响应数据清空（对齐 WCR 4 个落点）。
-// 【特别说明】handleJSEvent: 是小程序向微信注入“激励已看完”等业务回调的唯一入口。
-// 当 rewardedFastPass 开启时，必须放行该事件（携带 fastpass=1 让小程序立刻发奖），
-// 否则激励秒过会因回调被掐断而失败（表现为“点完不结算”）。
-%hook WAJSEventHandler_adOperateWXData
-- (void)handleJSEvent:(id)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) {
-        // 放行激励秒过的回调通道（不再拦截）
-        if ([DDAdBlockConfig sharedConfig].rewardedFastPass) {
-            %orig;
-            return;
-        }
-        return;
-    }
-    %orig;
-}
-- (void)endCancel {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
-    %orig;
-}
-- (void)endOKWithData:(id)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
-    %orig;
-}
-- (void)onResponseData:(id)arg1 {
     if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
     %orig;
 }
@@ -1245,6 +1233,18 @@ static BOOL DDAdBlockURLIsAdRequest(NSURL *url) {
 }
 %end
 
+// 限时激励秒过 UI（"广告 30秒后可获得奖励"+ 关闭按钮 顶部胶囊）：
+// v1.5.5 误以为是误伤删除，但用户 v1.5.6 反馈"激励广告不秒过"——
+// 真正的误伤源是 WAJSEventHandler_adOperateWXData（无关业务回调类，与广告上报无关），
+// 此 hook 只在 rewardedFastPass 开启时拦截 handleJSEvent:（避免误伤"看广告得奖励"业务入口）：
+// 关闭时正常放行，不影响普通激励流程。
+%hook WAJSEventHandler_showGameRewardsCapsuleBanner
+- (void)handleJSEvent:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].rewardedFastPass) return;
+    %orig;
+}
+%end
+
 
 // ========== 9. 广告曝光上报抑制（Hook: WCAdvertiseStatMgr，归总开关） ==========
 %hook WCAdvertiseStatMgr
@@ -1355,7 +1355,7 @@ static BOOL DDAdBlockURLIsAdRequest(NSURL *url) {
             id mgr = [mgrClass sharedInstance];
             if ([mgr respondsToSelector:@selector(registerControllerWithTitle:version:controller:)]) {
                 [mgr registerControllerWithTitle:@"DD广告拦截"
-                                         version:@"1.5.5"
+                                         version:@"1.5.6"
                                       controller:@"DDAdBlockSettingsViewController"];
             }
         }
