@@ -1,6 +1,9 @@
 //
-//  DD广告拦截 v1.2.7 — 微信广告拦截插件（单文件 Logos/Theos tweak）
+//  DD广告拦截 v1.2.8 — 微信广告拦截插件（单文件 Logos/Theos tweak）
 //  11 个开关，默认全部关闭；每个 Hook 经总开关 + 分区开关双重门控。
+//  v1.2.8 纯编译修复（CI 报错 “receiver type '_TtC6WeChat20/23MagicPlayableService' is a forward declaration”）：
+//    两处 [self notifyMiniProgramPlayableStatusWithIsEnd:YES] 改为 objc_msgSend 强转调用，
+//    绕开 Swift 前向声明类无法在编译期识别该方法的问题。逻辑与 v1.2.7 完全一致。
 //  v1.2.7 修对齐（再反汇编 WCR + 微信 7.6）：
 //    1) 试玩广告（PlayableAd / “试玩 19 秒获得奖励”）秒过：
 //       _TtC6WeChat20MagicPlayableService + _TtC6WeChat23MagicNewPlayableService
@@ -768,7 +771,9 @@ static NSString *DDAdBlockInjectJS(void) {
 - (void)startWithConfig:(id)arg1 {
     if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) {
         %orig(arg1);
-        [self notifyMiniProgramPlayableStatusWithIsEnd:YES];
+        // 前向声明的 Swift 类无法在编译期识别该方法，用 objc_msgSend 强转调用绕过
+        SEL _ddPlayableSel = NSSelectorFromString(@"notifyMiniProgramPlayableStatusWithIsEnd:");
+        if (_ddPlayableSel) ((void (*)(id, SEL, BOOL))objc_msgSend)((id)self, _ddPlayableSel, YES);
         return;
     }
     %orig;
@@ -786,7 +791,9 @@ static NSString *DDAdBlockInjectJS(void) {
 - (void)startWithConfig:(id)arg1 {
     if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) {
         %orig(arg1);
-        [self notifyMiniProgramPlayableStatusWithIsEnd:YES];
+        // 前向声明的 Swift 类无法在编译期识别该方法，用 objc_msgSend 强转调用绕过
+        SEL _ddPlayableSel = NSSelectorFromString(@"notifyMiniProgramPlayableStatusWithIsEnd:");
+        if (_ddPlayableSel) ((void (*)(id, SEL, BOOL))objc_msgSend)((id)self, _ddPlayableSel, YES);
         return;
     }
     %orig;
@@ -1182,7 +1189,7 @@ static BOOL DDAdBlockURLIsAdRequest(NSURL *url) {
             id mgr = [mgrClass sharedInstance];
             if ([mgr respondsToSelector:@selector(registerControllerWithTitle:version:controller:)]) {
                 [mgr registerControllerWithTitle:@"DD广告拦截"
-                                         version:@"1.2.7"
+                                         version:@"1.2.8"
                                       controller:@"DDAdBlockSettingsViewController"];
             }
         }
