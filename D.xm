@@ -1,5 +1,5 @@
 //
-//  DD广告拦截 v1.5.0 — 微信广告拦截插件（单文件 Logos/Theos tweak）
+//  DD广告拦截 v1.5.1 — 微信广告拦截插件（单文件 Logos/Theos tweak）
 //  10 个开关，默认全部开启（对齐 WCR「装即全拦」行为）；每个 Hook 经总开关 + 分区开关双重门控。
 //  v1.4.0 视频号评论广告 + 视频号贴纸广告 + 视频号激励秒过加强（精确对齐 WCR + 微信 7.6）：
 //    1) 视频号评论广告 cell：WCFinderCommentAdTableViewCell.initWithStyle:reuseIdentifier: → nil
@@ -15,6 +15,9 @@
 //       _adOperateWXData 透传 fastpass + WAJSEventHandler_openChannelsRewardedVideoAd.onSuccess 协同。
 //    4) 小程序 banner 加固：WAWebviewBottomBannerView 新增 layoutSubviews（frame=zero, hidden=YES）
 //       + reloadData（return）双重兜底，确保即使 init 被复用场景也完全不渲染。
+//  v1.5.1 纯编译修复（CI 报错 “property 'frame'/'hidden' cannot be found in forward class object
+//    'WAWebviewBottomBannerView'”）：WAWebviewBottomBannerView 仅前向声明，layoutSubviews 内
+//    self.frame/self.hidden 属性点语法编译期无法解析；改为强转 (UIView *)self 后操作（其真实基类即 UIView）。
 //  v1.5.0 对齐 WCR「默认全开 + 调用方法」：
 //    1) 默认开关全部开启（master/moments/brand/finder/live/miniProgram/network/search/expt/rewardedFastPass）
 //       —— 此前 DD 默认全关（仅 rewardedFastPass 默认开），与 WCR「装即全拦」行为相反，是实测仍见广告的根因。
@@ -689,8 +692,10 @@ static NSString *DDAdBlockInjectJS(void) {
 }
 - (void)layoutSubviews {
     if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) {
-        self.frame = CGRectZero;
-        self.hidden = YES;
+        // WAWebviewBottomBannerView 仅前向声明，编译期无法识别 UIView 属性；
+        // 强转 UIView*（其真实基类即为 UIView）后操作 frame/hidden，确保横幅彻底不渲染。
+        ((UIView *)self).frame = CGRectZero;
+        ((UIView *)self).hidden = YES;
         return;
     }
     %orig;
@@ -1333,7 +1338,7 @@ static BOOL DDAdBlockURLIsAdRequest(NSURL *url) {
             id mgr = [mgrClass sharedInstance];
             if ([mgr respondsToSelector:@selector(registerControllerWithTitle:version:controller:)]) {
                 [mgr registerControllerWithTitle:@"DD广告拦截"
-                                         version:@"1.5.0"
+                                         version:@"1.5.1"
                                       controller:@"DDAdBlockSettingsViewController"];
             }
         }
