@@ -1,9 +1,11 @@
 //
-//  DD广告拦截 v1.2.8 — 微信广告拦截插件（单文件 Logos/Theos tweak）
-//  11 个开关，默认全部关闭；每个 Hook 经总开关 + 分区开关双重门控。
+//  DD广告拦截 v1.2.9 — 微信广告拦截插件（单文件 Logos/Theos tweak）
+//  10 个开关，默认全部关闭；每个 Hook 经总开关 + 分区开关双重门控。
 //  v1.2.8 纯编译修复（CI 报错 “receiver type '_TtC6WeChat20/23MagicPlayableService' is a forward declaration”）：
 //    两处 [self notifyMiniProgramPlayableStatusWithIsEnd:YES] 改为 objc_msgSend 强转调用，
 //    绕开 Swift 前向声明类无法在编译期识别该方法的问题。逻辑与 v1.2.7 完全一致。
+//  v1.2.9 移除「关闭青少年模式弹窗」功能（WCR: disableTeenagerPopupEnabled）：删除对应开关、
+//    WCFinderTimelineTabViewController 的 3 个 hook 方法及设置项，不再拦截青少年模式弹窗。
 //  v1.2.7 修对齐（再反汇编 WCR + 微信 7.6）：
 //    1) 试玩广告（PlayableAd / “试玩 19 秒获得奖励”）秒过：
 //       _TtC6WeChat20MagicPlayableService + _TtC6WeChat23MagicNewPlayableService
@@ -24,7 +26,7 @@
 //    4) 视频号广告 banner 视图（WCFinderAdBannerView）init 返回 nil，不再渲染“广告”横条。
 //    v1.2.6 修微信 7.6 兼容性：internalGetAdInfoFromCacheWithPosId → getCachedAdInfoForPosId（MagicAdCommonService 已改名）。
 //  开关命名对齐 WCR（WCRefine）的 enhancedAdBlock*Enabled 模块：moments/brand/finder/live/
-//  miniProgram/network/search/rewardedAdFastPass/expt + 独立 disableTeenagerPopupEnabled。
+//  miniProgram/network/search/rewardedAdFastPass/expt。
 //  全部 Hook 落点经 WCR 反汇编精确核对（__cstring 说明字符串 + __objc_selrefs 双重证据）：
 //   v1.2.0 修正：小程序广告走“开屏 JS 事件 + 广告推送消息”双入口（WCR 机制）；
 //     激励广告走 adHasPlayOver + viewDidLoad；公众号/WebView 广告补 MBEventHandler_* JS 桥。
@@ -78,7 +80,6 @@ static NSString * const kDDAdBlockMiniProgramKey       = @"DDAdBlock_EnhancedAdB
 static NSString * const kDDAdBlockNetworkKey           = @"DDAdBlock_EnhancedAdBlockNetworkEnabled";     // WCR: enhancedAdBlockNetworkEnabled
 static NSString * const kDDAdBlockSearchKey            = @"DDAdBlock_EnhancedAdBlockSearchEnabled";      // WCR: enhancedAdBlockSearchEnabled
 static NSString * const kDDAdBlockRewardedFastPassKey  = @"DDAdBlock_EnhancedAdBlockRewardedAdFastPassEnabled"; // WCR: enhancedAdBlockRewardedAdFastPassEnabled
-static NSString * const kDDAdBlockTeenagerPopupKey     = @"DDAdBlock_DisableTeenagerPopupEnabled";       // WCR: disableTeenagerPopupEnabled（青少年弹窗，独立功能）
 static NSString * const kDDAdBlockExptKey              = @"DDAdBlock_EnhancedAdBlockExptEnabled";        // WCR: enhancedAdBlockExptEnabled（实验开关式广告抑制）
 
 @interface DDAdBlockConfig : NSObject
@@ -92,7 +93,6 @@ static NSString * const kDDAdBlockExptKey              = @"DDAdBlock_EnhancedAdB
 @property (assign, nonatomic) BOOL network;           // 网络层（WCR: enhancedAdBlockNetworkEnabled）
 @property (assign, nonatomic) BOOL search;            // 搜索（WCR: enhancedAdBlockSearchEnabled）
 @property (assign, nonatomic) BOOL rewardedFastPass;  // 激励广告快速过（WCR: enhancedAdBlockRewardedAdFastPassEnabled）
-@property (assign, nonatomic) BOOL teenagerPopup;     // 青少年弹窗（WCR: disableTeenagerPopupEnabled，独立功能）
 @property (assign, nonatomic) BOOL expt;              // 实验开关式广告抑制（WCR: enhancedAdBlockExptEnabled）
 @end
 
@@ -116,7 +116,6 @@ static NSString * const kDDAdBlockExptKey              = @"DDAdBlock_EnhancedAdB
         if ([ud objectForKey:kDDAdBlockNetworkKey]          == nil) [ud setBool:NO forKey:kDDAdBlockNetworkKey];
         if ([ud objectForKey:kDDAdBlockSearchKey]           == nil) [ud setBool:NO forKey:kDDAdBlockSearchKey];
         if ([ud objectForKey:kDDAdBlockRewardedFastPassKey] == nil) [ud setBool:YES forKey:kDDAdBlockRewardedFastPassKey];
-        if ([ud objectForKey:kDDAdBlockTeenagerPopupKey]    == nil) [ud setBool:NO forKey:kDDAdBlockTeenagerPopupKey];
         if ([ud objectForKey:kDDAdBlockExptKey]             == nil) [ud setBool:NO forKey:kDDAdBlockExptKey];
 
         _master           = [ud boolForKey:kDDAdBlockMasterKey];
@@ -128,7 +127,6 @@ static NSString * const kDDAdBlockExptKey              = @"DDAdBlock_EnhancedAdB
         _network          = [ud boolForKey:kDDAdBlockNetworkKey];
         _search           = [ud boolForKey:kDDAdBlockSearchKey];
         _rewardedFastPass = [ud boolForKey:kDDAdBlockRewardedFastPassKey];
-        _teenagerPopup    = [ud boolForKey:kDDAdBlockTeenagerPopupKey];
         _expt             = [ud boolForKey:kDDAdBlockExptKey];
     }
     return self;
@@ -176,11 +174,6 @@ static NSString * const kDDAdBlockExptKey              = @"DDAdBlock_EnhancedAdB
 - (void)setRewardedFastPass:(BOOL)value {
     _rewardedFastPass = value;
     [[NSUserDefaults standardUserDefaults] setBool:value forKey:kDDAdBlockRewardedFastPassKey];
-    [[NSUserDefaults standardUserDefaults] synchronize];
-}
-- (void)setTeenagerPopup:(BOOL)value {
-    _teenagerPopup = value;
-    [[NSUserDefaults standardUserDefaults] setBool:value forKey:kDDAdBlockTeenagerPopupKey];
     [[NSUserDefaults standardUserDefaults] synchronize];
 }
 - (void)setExpt:(BOOL)value {
@@ -1062,21 +1055,6 @@ static BOOL DDAdBlockURLIsAdRequest(NSURL *url) {
 }
 %end
 
-// ========== 8. 青少年模式弹窗（Hook: WCFinderTimelineTabViewController）[WCR: disableTeenagerPopupEnabled，独立功能] ==========
-%hook WCFinderTimelineTabViewController
-- (void)showTeenagerBlockAlertView {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].teenagerPopup) return;
-    %orig;
-}
-- (void)showTeenagerNavView {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].teenagerPopup) return;
-    %orig;
-}
-- (void)onShowTeenagerRestWithScene:(unsigned long long)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].teenagerPopup) return;
-    %orig;
-}
-%end
 
 // ========== 9. 广告曝光上报抑制（Hook: WCAdvertiseStatMgr，归总开关） ==========
 %hook WCAdvertiseStatMgr
@@ -1160,7 +1138,6 @@ static BOOL DDAdBlockURLIsAdRequest(NSURL *url) {
         [secAdv addCell:[cellCls switchCellForSel:@selector(onSearchSwitch:)      target:self title:@"屏蔽搜索广告"       on:cfg.search]];
         [secAdv addCell:[cellCls switchCellForSel:@selector(onRewardedSwitch:)    target:self title:@"激励广告快速跳过"   on:cfg.rewardedFastPass]];
         [secAdv addCell:[cellCls switchCellForSel:@selector(onExptSwitch:)        target:self title:@"实验开关广告抑制"   on:cfg.expt]];
-        [secAdv addCell:[cellCls switchCellForSel:@selector(onTeenagerSwitch:)    target:self title:@"关闭青少年模式弹窗" on:cfg.teenagerPopup]];
         [_tableViewManager addSection:secAdv];
     }
 
@@ -1177,7 +1154,6 @@ static BOOL DDAdBlockURLIsAdRequest(NSURL *url) {
 - (void)onSearchSwitch:(UISwitch *)s        { [DDAdBlockConfig sharedConfig].search = s.isOn; }
 - (void)onRewardedSwitch:(UISwitch *)s      { [DDAdBlockConfig sharedConfig].rewardedFastPass = s.isOn; }
 - (void)onExptSwitch:(UISwitch *)s          { [DDAdBlockConfig sharedConfig].expt = s.isOn; }
-- (void)onTeenagerSwitch:(UISwitch *)s      { [DDAdBlockConfig sharedConfig].teenagerPopup = s.isOn; }
 
 @end
 
@@ -1189,7 +1165,7 @@ static BOOL DDAdBlockURLIsAdRequest(NSURL *url) {
             id mgr = [mgrClass sharedInstance];
             if ([mgr respondsToSelector:@selector(registerControllerWithTitle:version:controller:)]) {
                 [mgr registerControllerWithTitle:@"DD广告拦截"
-                                         version:@"1.2.8"
+                                         version:@"1.2.9"
                                       controller:@"DDAdBlockSettingsViewController"];
             }
         }
