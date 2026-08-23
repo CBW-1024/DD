@@ -1,8 +1,8 @@
 //
-//  DD广告拦截 v1.5.1 — 微信广告拦截插件（单文件 Logos/Theos tweak）
+//  DD广告拦截 v1.5.3 — 微信广告拦截插件（单文件 Logos/Theos tweak）
 //  10 个开关，默认全部开启（对齐 WCR「装即全拦」行为）；每个 Hook 经总开关 + 分区开关双重门控。
 //  v1.4.0 视频号评论广告 + 视频号贴纸广告 + 视频号激励秒过加强（精确对齐 WCR + 微信 7.6）：
-//    1) 视频号评论广告 cell：WCFinderCommentAdTableViewCell.initWithStyle:reuseIdentifier: → nil
+//    1) 视频号评论广告 cell：WCFinderCommentAdTableViewCell 兜底隐藏（init 不返回 nil，防评论页闪退）
 //       + updateWithModel:width: → return（防已复用 cell）。覆盖视频评论区里插入的“广告”推广 cell。
 //    2) 视频号贴纸广告：WCFinderFeedStickerAdViewController.initWithParam: → nil
 //       + WCFinderFeedInlineStickerAdView.initWithFrame: → nil
@@ -15,6 +15,21 @@
 //       _adOperateWXData 透传 fastpass + WAJSEventHandler_openChannelsRewardedVideoAd.onSuccess 协同。
 //    4) 小程序 banner 加固：WAWebviewBottomBannerView 新增 layoutSubviews（frame=zero, hidden=YES）
 //       + reloadData（return）双重兜底，确保即使 init 被复用场景也完全不渲染。
+//  v1.5.3 补全小程序广告 JS 桥（视频反馈仍有 3 种广告未拦住，全部为独立 JS 桥入口）：
+//    1) 游戏奖励胶囊：WAJSEventHandler_showGameRewardsCapsuleBanner.handleJSEvent: → return
+//       对应视频里“广告 30秒后可获得奖励”+ 关闭按钮 的顶部胶囊。
+//    2) 广告画布（AD Canvas）：WAJSEventHandler_openADCanvas.handleJSEvent: → return
+//       头文件确认其持有 WCAdvertiseInfo *adInfo，对应视频里小程序内灰色“广告”标签的原生横幅
+//       （“诡秘之主”游戏广告等），是 WAWebviewBottomBannerView 之外的另一类广告入口。
+//    3) 应用内下载广告：WAJSEventHandler_downloadAppInternal.handleJSEvent: → return
+//       对应视频里底部“向僵尸无限开炮 下载游戏”AppStore 内下载弹卡。
+//    4) 相关游戏推荐视图：WAJSEventHandler_showRelatedGamesView.handleJSEvent: → return
+//       对应相关游戏/下载游戏的推荐弹层入口，与 3) 互补。
+//  v1.5.2 修复「视频号打开评论直接闪退」回归（v1.4.0 引入）：
+//    WCFinderCommentAdTableViewCell.initWithStyle:reuseIdentifier: 此前 return nil，UITableView 走注册类
+//    dequeue 拿到 nil 会抛 NSInternalInconsistencyException 崩溃。改为 init 永不返回 nil，updateWithModel
+//    时隐藏并跳过；并新增 %hook WCFinderComment 对齐 WCR 数据层拦截（advertisementInfo /
+//    commentAdImageUrl 返回 nil），从源头让广告评论失去广告属性，不再走广告渲染。
 //  v1.5.1 纯编译修复（CI 报错 “property 'frame'/'hidden' cannot be found in forward class object
 //    'WAWebviewBottomBannerView'”）：WAWebviewBottomBannerView 仅前向声明，layoutSubviews 内
 //    self.frame/self.hidden 属性点语法编译期无法解析；改为强转 (UIView *)self 后操作（其真实基类即 UIView）。
@@ -714,15 +729,19 @@ static NSString *DDAdBlockInjectJS(void) {
 %end
 
 // 视频号评论流中的广告 cell（v1.4.0 新增，覆盖图1 “评论 5354” 下方的岚图梦想家广告 cell）。
-// WCR cstring/selrefs 未显式 hook 该 cell，WCR 靠“评论流不返回广告数据”间接处理；本 tweak
-// 在原生层兜底：init 不创建 + updateWithModel 不更新，双保险。
+// 对齐 WCR 数据层拦截：WCR 不 hook 该 cell，而是 neutralize WCFinderComment.advertisementInfo /
+// commentAdImageUrl（见下方 %hook WCFinderComment），使广告评论失去广告属性、不再走广告渲染。
+// 本 tweak 在原生层兜底：init 必须返回真实 cell（不能 return nil，否则 UITableView 注册类 dequeue
+// 拿到 nil 会抛 NSInternalInconsistencyException 直接闪退），updateWithModel 时隐藏并跳过广告填充。
 %hook WCFinderCommentAdTableViewCell
 - (id)initWithStyle:(long long)arg1 reuseIdentifier:(id)arg2 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return nil;
-    return %orig;
+    return %orig; // 绝不在 UITableViewCell init 返回 nil，避免评论页打开即崩
 }
 - (void)updateWithModel:(id)arg1 width:(double)arg2 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return;
+    if (ddActive() && [DDAdBlockConfig sharedConfig].finder) {
+        ((UIView *)self).hidden = YES; // 兜底：即便被路由到广告 cell，也隐藏不渲染
+        return;
+    }
     %orig;
 }
 %end
@@ -838,6 +857,44 @@ static NSString *DDAdBlockInjectJS(void) {
 
 // 开屏广告“菜单”JS 事件处理器：菜单触发同样丢弃。
 %hook WAJSEventHandler_showSplashAdMenu
+- (void)handleJSEvent:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
+    %orig;
+}
+%end
+
+// 游戏奖励胶囊（v1.5.2 新增，对应视频里“30秒后可获得奖励” + 关闭按钮 的顶部胶囊广告）
+// 微信7.6 头文件确认 WAJSEventHandler_showGameRewardsCapsuleBanner 为独立 JS 桥，
+// 之前 DD 未 hook，小程序内游戏场景仍会弹出该胶囊。handleJSEvent: 短路即不展示。
+%hook WAJSEventHandler_showGameRewardsCapsuleBanner
+- (void)handleJSEvent:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
+    %orig;
+}
+%end
+
+// 广告画布（v1.5.2 新增，对应视频里小程序内灰色“广告”标签的原生横幅，例如“诡秘之主”游戏广告）
+// 头文件确认 WAJSEventHandler_openADCanvas 持有 WCAdvertiseInfo *adInfo，是小程序内原生广告画布入口。
+// 短路 handleJSEvent: 后整张广告画布不再渲染。
+%hook WAJSEventHandler_openADCanvas
+- (void)handleJSEvent:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
+    %orig;
+}
+%end
+
+// 应用内下载广告（v1.5.2 新增，对应视频里底部“向僵尸无限开炮 下载游戏”弹卡）
+// 头文件确认 WAJSEventHandler_downloadAppInternal 为 AppStore 内下载入口，常被广告 SDK 触发。
+%hook WAJSEventHandler_downloadAppInternal
+- (void)handleJSEvent:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
+    %orig;
+}
+%end
+
+// 相关游戏推荐视图（v1.5.2 新增，对应视频里底部相关游戏/下载游戏的推荐弹卡）
+// 头文件确认 WAJSEventHandler_showRelatedGamesView 为 JS 触发的相关游戏弹层入口。
+%hook WAJSEventHandler_showRelatedGamesView
 - (void)handleJSEvent:(id)arg1 {
     if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
     %orig;
@@ -1338,7 +1395,7 @@ static BOOL DDAdBlockURLIsAdRequest(NSURL *url) {
             id mgr = [mgrClass sharedInstance];
             if ([mgr respondsToSelector:@selector(registerControllerWithTitle:version:controller:)]) {
                 [mgr registerControllerWithTitle:@"DD广告拦截"
-                                         version:@"1.5.1"
+                                         version:@"1.5.3"
                                       controller:@"DDAdBlockSettingsViewController"];
             }
         }
