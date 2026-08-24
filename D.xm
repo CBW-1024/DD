@@ -1,9 +1,11 @@
-/*
- * FXAdBlock v1.0.0 — 微信全场景广告拦截插件（Theos Logos Tweak）
- * 默认全开，支持开关分场景控制。
- * 核心修复：视频号评论区 Hook 不返回 nil，保证 UITableView 数据源完整，
- *          广告拦截下沉到数据层（WCFinderComment.advertisementInfo 等返回 nil）。
- */
+//
+//  DDAdBlock.xm
+//  DD广告拦截 v1.0.0 — 微信全场景广告拦截插件（Theos/Logos tweak）
+//
+//  功能：默认全开，覆盖朋友圈/公众号/视频号/直播/小程序/搜索/网络层/激励广告/实验开关广告抑制。
+//  核心修复（相对早期版本）：视频号评论区 hook 不返回 nil，保证 UITableView 数据源完整，
+//  广告拦截下沉到 WCFinderComment 数据层（advertisementInfo/commentAdImageUrl → nil）。
+//
 
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
@@ -11,267 +13,223 @@
 #import <dispatch/dispatch.h>
 #import <objc/runtime.h>
 
-// ================= 插件管理入口 =================
+// ========== 插件管理入口 ==========
 @interface WCPluginsMgr : NSObject
 + (instancetype)sharedInstance;
 - (void)registerControllerWithTitle:(NSString *)title version:(NSString *)version controller:(NSString *)controller;
 @end
 
-// ================= 配置开关（默认全开） =================
-static NSString * const kFXMasterKey            = @"FXAdBlock_MasterEnabled";
-static NSString * const kFXMomentsKey           = @"FXAdBlock_MomentsEnabled";
-static NSString * const kFXBrandKey             = @"FXAdBlock_BrandEnabled";
-static NSString * const kFXFinderKey            = @"FXAdBlock_FinderEnabled";
-static NSString * const kFXLiveKey              = @"FXAdBlock_LiveEnabled";
-static NSString * const kFXMiniProgramKey       = @"FXAdBlock_MiniProgramEnabled";
-static NSString * const kFXNetworkKey           = @"FXAdBlock_NetworkEnabled";
-static NSString * const kFXSearchKey            = @"FXAdBlock_SearchEnabled";
-static NSString * const kFXRewardedFastPassKey  = @"FXAdBlock_RewardedFastPassEnabled";
-static NSString * const kFXExptKey              = @"FXAdBlock_ExptEnabled";
+// ========== 配置开关 Key（DDAdBlock 前缀，默认全开） ==========
+static NSString * const kDDAdBlockMasterKey            = @"DDAdBlock_MasterEnabled";
+static NSString * const kDDAdBlockMomentsKey           = @"DDAdBlock_MomentsEnabled";
+static NSString * const kDDAdBlockBrandKey             = @"DDAdBlock_BrandEnabled";
+static NSString * const kDDAdBlockFinderKey            = @"DDAdBlock_FinderEnabled";
+static NSString * const kDDAdBlockLiveKey              = @"DDAdBlock_LiveEnabled";
+static NSString * const kDDAdBlockMiniProgramKey       = @"DDAdBlock_MiniProgramEnabled";
+static NSString * const kDDAdBlockNetworkKey           = @"DDAdBlock_NetworkEnabled";
+static NSString * const kDDAdBlockSearchKey            = @"DDAdBlock_SearchEnabled";
+static NSString * const kDDAdBlockRewardedFastPassKey  = @"DDAdBlock_RewardedFastPassEnabled";
+static NSString * const kDDAdBlockExptKey              = @"DDAdBlock_ExptEnabled";
 
-@interface FXAdBlockConfig : NSObject
+// ========== 配置类 ==========
+@interface DDAdBlockConfig : NSObject
 + (instancetype)sharedConfig;
-@property (assign, nonatomic) BOOL master, moments, brand, finder, live, miniProgram, network, search, rewardedFastPass, expt;
+@property (assign, nonatomic) BOOL master;
+@property (assign, nonatomic) BOOL moments;
+@property (assign, nonatomic) BOOL brand;
+@property (assign, nonatomic) BOOL finder;
+@property (assign, nonatomic) BOOL live;
+@property (assign, nonatomic) BOOL miniProgram;
+@property (assign, nonatomic) BOOL network;
+@property (assign, nonatomic) BOOL search;
+@property (assign, nonatomic) BOOL rewardedFastPass;
+@property (assign, nonatomic) BOOL expt;
 @end
 
-@implementation FXAdBlockConfig
+// setter 宏：name_lc 为属性名（全小写），与编译器自动合成的 _name_lc ivar 一致。
+#define DDADBLOCK_SETTER(name_lc, key) \
+    -(void)set##name_lc:(BOOL)v { \
+        _##name_lc = v; \
+        [[NSUserDefaults standardUserDefaults] setBool:v forKey:key]; \
+    }
+
+@implementation DDAdBlockConfig
 + (instancetype)sharedConfig {
-    static FXAdBlockConfig *c = nil;
-    static dispatch_once_t t; dispatch_once(&t, ^{ c = [self new]; });
+    static DDAdBlockConfig *c = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ c = [DDAdBlockConfig new]; });
     return c;
 }
 - (instancetype)init {
-    if ((self = [super init])) {
+    if (self = [super init]) {
         NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-        if ([ud objectForKey:kFXMasterKey] == nil)            [ud setBool:YES forKey:kFXMasterKey];
-        if ([ud objectForKey:kFXMomentsKey] == nil)           [ud setBool:YES forKey:kFXMomentsKey];
-        if ([ud objectForKey:kFXBrandKey] == nil)             [ud setBool:YES forKey:kFXBrandKey];
-        if ([ud objectForKey:kFXFinderKey] == nil)            [ud setBool:YES forKey:kFXFinderKey];
-        if ([ud objectForKey:kFXLiveKey] == nil)              [ud setBool:YES forKey:kFXLiveKey];
-        if ([ud objectForKey:kFXMiniProgramKey] == nil)       [ud setBool:YES forKey:kFXMiniProgramKey];
-        if ([ud objectForKey:kFXNetworkKey] == nil)           [ud setBool:YES forKey:kFXNetworkKey];
-        if ([ud objectForKey:kFXSearchKey] == nil)            [ud setBool:YES forKey:kFXSearchKey];
-        if ([ud objectForKey:kFXRewardedFastPassKey] == nil)  [ud setBool:YES forKey:kFXRewardedFastPassKey];
-        if ([ud objectForKey:kFXExptKey] == nil)              [ud setBool:YES forKey:kFXExptKey];
-        _master = [ud boolForKey:kFXMasterKey];
-        _moments = [ud boolForKey:kFXMomentsKey];
-        _brand = [ud boolForKey:kFXBrandKey];
-        _finder = [ud boolForKey:kFXFinderKey];
-        _live = [ud boolForKey:kFXLiveKey];
-        _miniProgram = [ud boolForKey:kFXMiniProgramKey];
-        _network = [ud boolForKey:kFXNetworkKey];
-        _search = [ud boolForKey:kFXSearchKey];
-        _rewardedFastPass = [ud boolForKey:kFXRewardedFastPassKey];
-        _expt = [ud boolForKey:kFXExptKey];
+        if ([ud objectForKey:kDDAdBlockMasterKey] == nil) [ud setBool:YES forKey:kDDAdBlockMasterKey];
+        if ([ud objectForKey:kDDAdBlockMomentsKey] == nil) [ud setBool:YES forKey:kDDAdBlockMomentsKey];
+        if ([ud objectForKey:kDDAdBlockBrandKey] == nil) [ud setBool:YES forKey:kDDAdBlockBrandKey];
+        if ([ud objectForKey:kDDAdBlockFinderKey] == nil) [ud setBool:YES forKey:kDDAdBlockFinderKey];
+        if ([ud objectForKey:kDDAdBlockLiveKey] == nil) [ud setBool:YES forKey:kDDAdBlockLiveKey];
+        if ([ud objectForKey:kDDAdBlockMiniProgramKey] == nil) [ud setBool:YES forKey:kDDAdBlockMiniProgramKey];
+        if ([ud objectForKey:kDDAdBlockNetworkKey] == nil) [ud setBool:YES forKey:kDDAdBlockNetworkKey];
+        if ([ud objectForKey:kDDAdBlockSearchKey] == nil) [ud setBool:YES forKey:kDDAdBlockSearchKey];
+        if ([ud objectForKey:kDDAdBlockRewardedFastPassKey] == nil) [ud setBool:YES forKey:kDDAdBlockRewardedFastPassKey];
+        if ([ud objectForKey:kDDAdBlockExptKey] == nil) [ud setBool:YES forKey:kDDAdBlockExptKey];
+
+        _master = [ud boolForKey:kDDAdBlockMasterKey];
+        _moments = [ud boolForKey:kDDAdBlockMomentsKey];
+        _brand = [ud boolForKey:kDDAdBlockBrandKey];
+        _finder = [ud boolForKey:kDDAdBlockFinderKey];
+        _live = [ud boolForKey:kDDAdBlockLiveKey];
+        _miniProgram = [ud boolForKey:kDDAdBlockMiniProgramKey];
+        _network = [ud boolForKey:kDDAdBlockNetworkKey];
+        _search = [ud boolForKey:kDDAdBlockSearchKey];
+        _rewardedFastPass = [ud boolForKey:kDDAdBlockRewardedFastPassKey];
+        _expt = [ud boolForKey:kDDAdBlockExptKey];
     }
     return self;
 }
-#define FX_SETTER(name, key) -(void)set##name:(BOOL)v { _##name = v; [[NSUserDefaults standardUserDefaults] setBool:v forKey:key]; }
-FX_SETTER(Master, kFXMasterKey)
-FX_SETTER(Moments, kFXMomentsKey)
-FX_SETTER(Brand, kFXBrandKey)
-FX_SETTER(Finder, kFXFinderKey)
-FX_SETTER(Live, kFXLiveKey)
-FX_SETTER(MiniProgram, kFXMiniProgramKey)
-FX_SETTER(Network, kFXNetworkKey)
-FX_SETTER(Search, kFXSearchKey)
-FX_SETTER(RewardedFastPass, kFXRewardedFastPassKey)
-FX_SETTER(Expt, kFXExptKey)
-#undef FX_SETTER
+
+DDADBLOCK_SETTER(master,            kDDAdBlockMasterKey)
+DDADBLOCK_SETTER(moments,           kDDAdBlockMomentsKey)
+DDADBLOCK_SETTER(brand,             kDDAdBlockBrandKey)
+DDADBLOCK_SETTER(finder,            kDDAdBlockFinderKey)
+DDADBLOCK_SETTER(live,              kDDAdBlockLiveKey)
+DDADBLOCK_SETTER(miniProgram,       kDDAdBlockMiniProgramKey)
+DDADBLOCK_SETTER(network,           kDDAdBlockNetworkKey)
+DDADBLOCK_SETTER(search,            kDDAdBlockSearchKey)
+DDADBLOCK_SETTER(rewardedFastPass,  kDDAdBlockRewardedFastPassKey)
+DDADBLOCK_SETTER(expt,              kDDAdBlockExptKey)
 @end
 
-static BOOL fxActive(void) { return [FXAdBlockConfig sharedConfig].master; }
-static FXAdBlockConfig *fxCfg(void) { return [FXAdBlockConfig sharedConfig]; }
+// 总开关守卫
+static BOOL DDAdBlockActive(void) { return [DDAdBlockConfig sharedConfig].master; }
 
-// ================= 1. 朋友圈广告 =================
+// ========== 1. 朋友圈广告拦截 ==========
 %hook WCAdvertiseDataHelper
-- (void)saveAdPullCompareInfo:(id)a { if (fxActive() && fxCfg().moments) return; %orig; }
-- (void)saveAdvertiseMsgXmlDatas { if (fxActive() && fxCfg().moments) return; %orig; }
-- (void)addAdvertiseDataList:(id)a { if (fxActive() && fxCfg().moments) return; %orig; }
-- (void)addAdvertiseData:(id)a needUpdateCreateTime:(BOOL)b { if (fxActive() && fxCfg().moments) return; %orig; }
-- (void)saveAdvertiseDatas { if (fxActive() && fxCfg().moments) return; %orig; }
-- (void)tryLoadAdvertiseData { if (fxActive() && fxCfg().moments) return; %orig; }
-- (id)m_advertiseList { if (fxActive() && fxCfg().moments) return nil; return %orig; }
-- (id)m_advertiseMsgXmlList { if (fxActive() && fxCfg().moments) return nil; return %orig; }
-- (BOOL)m_bLoaded { if (fxActive() && fxCfg().moments) return NO; return %orig; }
-- (BOOL)IsAdvertiseDataValid:(id)a dataItem:(id)b { if (fxActive() && fxCfg().moments) return NO; return %orig; }
-- (BOOL)isAdPreviewExpired:(id)a { if (fxActive() && fxCfg().moments) return YES; return %orig; }
+- (void)saveAdPullCompareInfo:(id)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].moments) return; %orig; }
+- (void)saveAdvertiseMsgXmlDatas { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].moments) return; %orig; }
+- (void)addAdvertiseDataList:(id)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].moments) return; %orig; }
+- (void)addAdvertiseData:(id)arg1 needUpdateCreateTime:(BOOL)arg2 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].moments) return; %orig; }
+- (void)saveAdvertiseDatas { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].moments) return; %orig; }
+- (void)tryLoadAdvertiseData { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].moments) return; %orig; }
+- (id)m_advertiseList { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].moments) return nil; return %orig; }
+- (id)m_advertiseMsgXmlList { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].moments) return nil; return %orig; }
+- (BOOL)m_bLoaded { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].moments) return NO; return %orig; }
+- (BOOL)IsAdvertiseDataValid:(id)arg1 dataItem:(id)arg2 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].moments) return NO; return %orig; }
+- (BOOL)isAdPreviewExpired:(id)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].moments) return YES; return %orig; }
 %end
 
 %hook WCAdDB
-- (void)createPullRecordTable { if (fxActive() && fxCfg().moments) return; %orig; }
-- (void)createTables { if (fxActive() && fxCfg().moments) return; %orig; }
-- (void)initDB { if (fxActive() && fxCfg().moments) return; %orig; }
+- (void)createPullRecordTable { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].moments) return; %orig; }
+- (void)createTables { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].moments) return; %orig; }
+- (void)initDB { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].moments) return; %orig; }
 %end
 
 %hook WCAdvertiseInfo
-+ (id)dictionaryFromADDynamicInfo:(id)a { if (fxActive() && fxCfg().moments) return nil; return %orig; }
-- (id)adType { if (fxActive() && fxCfg().moments) return nil; return %orig; }
-- (id)h5PageWrap { if (fxActive() && fxCfg().moments) return nil; return %orig; }
-- (id)poiH5PageWrap { if (fxActive() && fxCfg().moments) return nil; return %orig; }
-- (long long)previewExpiredTime { if (fxActive() && fxCfg().moments) return 0; return %orig; }
-- (BOOL)adExpired { if (fxActive() && fxCfg().moments) return YES; return %orig; }
-- (BOOL)setItem:(id)a value:(id)b forDynamic:(id)c { if (fxActive() && fxCfg().moments) return NO; return %orig; }
++ (id)dictionaryFromADDynamicInfo:(id)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].moments) return nil; return %orig; }
+- (id)adType { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].moments) return nil; return %orig; }
+- (id)h5PageWrap { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].moments) return nil; return %orig; }
+- (id)poiH5PageWrap { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].moments) return nil; return %orig; }
+- (long long)previewExpiredTime { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].moments) return 0; return %orig; }
+- (BOOL)adExpired { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].moments) return YES; return %orig; }
+- (BOOL)setItem:(id)arg1 value:(id)arg2 forDynamic:(id)arg3 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].moments) return NO; return %orig; }
 %end
 
-%hook WCADBodyWrap
-- (id)init { if (fxActive() && fxCfg().moments) return nil; return %orig; }
-%end
-%hook WCADCanvasInfo
-- (id)init { if (fxActive() && fxCfg().moments) return nil; return %orig; }
-%end
-%hook WCADPageWrap
-- (id)adID { if (fxActive() && fxCfg().moments) return nil; return %orig; }
-- (id)miniShopRequestId { if (fxActive() && fxCfg().moments) return nil; return %orig; }
-- (id)uxInfo { if (fxActive() && fxCfg().moments) return nil; return %orig; }
-- (int)adType { if (fxActive() && fxCfg().moments) return 0; return %orig; }
-%end
-%hook WCAdCanvasLoadParams
-- (id)cacheKey { if (fxActive() && fxCfg().moments) return nil; return %orig; }
-- (id)canvasId { if (fxActive() && fxCfg().moments) return nil; return %orig; }
-- (id)canvasDynamicInfo { if (fxActive() && fxCfg().moments) return nil; return %orig; }
-- (id)dynamicCanvasLibVersion { if (fxActive() && fxCfg().moments) return nil; return %orig; }
-%end
-%hook WCAdDynamicCanvasPageInfo
-- (id)fetchRealUxInfo { if (fxActive() && fxCfg().moments) return nil; return %orig; }
-- (id)fetchPageInfoExtraDic { if (fxActive() && fxCfg().moments) return nil; return %orig; }
-- (id)fetchPageInfoDic { if (fxActive() && fxCfg().moments) return nil; return %orig; }
-- (id)fetchLaunchString { if (fxActive() && fxCfg().moments) return nil; return %orig; }
-%end
-%hook WCAdDynamicCanvasServerData
-- (void)initialize { if (fxActive() && fxCfg().moments) return; %orig; }
-- (BOOL)isValid { if (fxActive() && fxCfg().moments) return NO; return %orig; }
-- (id)fromPBCodingBuffer:(id)a { if (fxActive() && fxCfg().moments) return nil; return %orig; }
-- (void)toPBCodingBuffer { if (fxActive() && fxCfg().moments) return; %orig; }
-%end
-%hook ObjectAdContentH5
-- (id)url { if (fxActive() && fxCfg().moments) return nil; return %orig; }
-%end
-%hook ObjectAdItem
-- (id)adDesc { if (fxActive() && fxCfg().moments) return nil; return %orig; }
-- (id)uxinfo { if (fxActive() && fxCfg().moments) return nil; return %orig; }
-%end
-%hook AdPushMsgDBMgr
-- (void)initDB { if (fxActive() && fxCfg().moments) return; %orig; }
-- (void)insertNewPushMsg:(id)a { if (fxActive() && fxCfg().moments) return; %orig; }
-%end
-%hook WCCanvasDynamicDataLoader
-- (void)handleAdCanvasInfoResponse:(id)a { if (fxActive() && fxCfg().moments) return; %orig; }
-%end
-
-// ================= 2. 公众号广告 =================
+// ========== 2. 公众号广告拦截 ==========
 %hook BrandTLExptConfig
-- (BOOL)isExptNotShowAd { if (fxActive() && fxCfg().expt) return YES; return %orig; }
-- (BOOL)isExptNotShowFinderLiveBar { if (fxActive() && fxCfg().expt) return YES; return %orig; }
-- (BOOL)isExptNotShowRecCard { if (fxActive() && fxCfg().expt) return YES; return %orig; }
-- (BOOL)isExptNotShowRecoFlow { if (fxActive() && fxCfg().expt) return YES; return %orig; }
-- (unsigned int)exptShowOption { unsigned int v = %orig; if (fxActive() && fxCfg().expt) return v & ~2U; return v; }
-- (void)setExptShowOption:(unsigned int)v { if (fxActive() && fxCfg().expt) { %orig(v & ~2U); return; } %orig; }
+- (BOOL)isExptNotShowAd { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].expt) return YES; return %orig; }
+- (BOOL)isExptNotShowFinderLiveBar { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].expt) return YES; return %orig; }
+- (BOOL)isExptNotShowRecCard { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].expt) return YES; return %orig; }
+- (BOOL)isExptNotShowRecoFlow { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].expt) return YES; return %orig; }
+- (unsigned int)exptShowOption { unsigned int v = %orig; if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].expt) return v & ~2U; return v; }
+- (void)setExptShowOption:(unsigned int)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].expt) { %orig(arg1 & ~2U); return; } %orig; }
 %end
 
 %hook BrandTLCanvasCardMgr
-- (BOOL)isAdCardOpen { if (fxActive() && fxCfg().brand) return NO; return %orig; }
-- (BOOL)isAdRequestOpen { if (fxActive() && fxCfg().brand) return NO; return %orig; }
-- (void)handleBizAdNotifyNewXml:(id)a { if (fxActive() && fxCfg().brand) return; %orig; }
+- (BOOL)isAdCardOpen { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].brand) return NO; return %orig; }
+- (BOOL)isAdRequestOpen { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].brand) return NO; return %orig; }
+- (void)handleBizAdNotifyNewXml:(id)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].brand) return; %orig; }
 %end
 
 %hook BrandAdDataParser
-+ (id)adDataItemForContent:(id)a { if (fxActive() && fxCfg().brand) return nil; return %orig; }
-+ (id)adDataItemForMsgWrap:(id)a { if (fxActive() && fxCfg().brand) return nil; return %orig; }
-+ (id)adInfoDicForContent:(id)a { if (fxActive() && fxCfg().brand) return nil; return %orig; }
-+ (id)adInfoDicForMsgWrap:(id)a { if (fxActive() && fxCfg().brand) return nil; return %orig; }
-+ (id)bizTypeForAdInfoDic:(id)a { if (fxActive() && fxCfg().brand) return nil; return %orig; }
-+ (id)traceIdForAdInfoDic:(id)a { if (fxActive() && fxCfg().brand) return nil; return %orig; }
++ (id)adDataItemForContent:(id)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].brand) return nil; return %orig; }
++ (id)adDataItemForMsgWrap:(id)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].brand) return nil; return %orig; }
++ (id)adInfoDicForContent:(id)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].brand) return nil; return %orig; }
++ (id)adInfoDicForMsgWrap:(id)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].brand) return nil; return %orig; }
++ (id)bizTypeForAdInfoDic:(id)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].brand) return nil; return %orig; }
++ (id)traceIdForAdInfoDic:(id)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].brand) return nil; return %orig; }
 %end
 
 %hook BrandAdDataItem
-- (id)content { if (fxActive() && fxCfg().brand) return nil; return %orig; }
-- (id)dicAdInfo { if (fxActive() && fxCfg().brand) return nil; return %orig; }
+- (id)content { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].brand) return nil; return %orig; }
+- (id)dicAdInfo { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].brand) return nil; return %orig; }
 %end
 
 %hook WCAdXmlParser
-+ (BOOL)ExtractRecommendAdInfo:(id)a ByAdMsgXml:(id)b { if (fxActive() && fxCfg().brand) return NO; return %orig; }
-+ (BOOL)SetAdvertiseXml:(id)a ByAdXml:(id)b { if (fxActive() && fxCfg().brand) return NO; return %orig; }
-+ (BOOL)SetAdvertiseInfo:(id)a ByAdInfoXml:(struct XmlReaderNode_t *)b { if (fxActive() && fxCfg().brand) return NO; return %orig; }
-+ (BOOL)SetAdvertiseInfo:(id)a ByAdInfo:(id)b { if (fxActive() && fxCfg().brand) return NO; return %orig; }
++ (BOOL)ExtractRecommendAdInfo:(id)arg1 ByAdMsgXml:(id)arg2 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].brand) return NO; return %orig; }
++ (BOOL)SetAdvertiseXml:(id)arg1 ByAdXml:(id)arg2 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].brand) return NO; return %orig; }
++ (BOOL)SetAdvertiseInfo:(id)arg1 ByAdInfoXml:(struct XmlReaderNode_t *)arg2 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].brand) return NO; return %orig; }
++ (BOOL)SetAdvertiseInfo:(id)arg1 ByAdInfo:(id)arg2 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].brand) return NO; return %orig; }
 %end
 
+// 公众号广告 JS 桥拦截
 %hook MBEventHandler_getAdPushMsg
-- (void)invoke:(id)a { if (fxActive() && fxCfg().brand) return; %orig; }
+- (void)invoke:(id)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].brand) return; %orig; }
 %end
 %hook MBEventHandler_getOldAdInfo
-- (void)invoke:(id)a { if (fxActive() && fxCfg().brand) return; %orig; }
+- (void)invoke:(id)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].brand) return; %orig; }
 %end
 %hook MBEventHandler_setAdRequestInfo
-- (void)invoke:(id)a { if (fxActive() && fxCfg().brand) return; %orig; }
+- (void)invoke:(id)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].brand) return; %orig; }
 %end
 %hook MBEventHandler_setAdCardRequestInfo
-- (void)invoke:(id)a { if (fxActive() && fxCfg().brand) return; %orig; }
+- (void)invoke:(id)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].brand) return; %orig; }
 %end
 %hook MBEventHandler_setFeedsAdRequestInfo
-- (void)invoke:(id)a { if (fxActive() && fxCfg().brand) return; %orig; }
+- (void)invoke:(id)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].brand) return; %orig; }
 %end
 
 %hook WebviewJSEventHandler_getAdIdInfo
 - (BOOL)checkUrlValid {
-    FXAdBlockConfig *c = fxCfg();
-    if (fxActive() && (c.brand || c.miniProgram || c.network)) return NO;
+    DDAdBlockConfig *cfg = [DDAdBlockConfig sharedConfig];
+    if (DDAdBlockActive() && (cfg.brand || cfg.miniProgram || cfg.network)) return NO;
     return %orig;
 }
-- (void)handleJSEvent:(id)a HandlerFacade:(id)b ExtraData:(id)c {
-    if (fxActive() && fxCfg().moments) return; %orig;
+- (void)handleJSEvent:(id)arg1 HandlerFacade:(id)arg2 ExtraData:(id)arg3 {
+    if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].moments) return; %orig;
 }
 %end
 
 %hook WebviewJSEventHandler_adDataReport
-- (void)handleJSEvent:(id)a HandlerFacade:(id)b ExtraData:(id)c {
-    FXAdBlockConfig *cf = fxCfg();
-    if (fxActive() && (cf.brand || cf.miniProgram || cf.network)) return;
+- (void)handleJSEvent:(id)arg1 HandlerFacade:(id)arg2 ExtraData:(id)arg3 {
+    DDAdBlockConfig *cfg = [DDAdBlockConfig sharedConfig];
+    if (DDAdBlockActive() && (cfg.brand || cfg.miniProgram || cfg.network)) return;
     %orig;
 }
 %end
 
+// 公众号 Flutter 页广告拦截
 %hook BrandTLFlutterViewController
-- (BOOL)enableAd { if (fxActive()) return NO; return %orig; }
-- (void)setEnableAd:(BOOL)v { if (fxActive()) return; %orig; }
-- (void)reportAdBrandCardOnClick { if (fxActive()) return; %orig; }
-- (id)initWithExptConfig:(id)a { if (fxActive()) return nil; return %orig; }
-- (id)getMagicBrushFlutterPlugins { if (fxActive()) return nil; return %orig; }
+- (BOOL)enableAd { if (DDAdBlockActive()) return NO; return %orig; }
+- (void)setEnableAd:(BOOL)arg1 { if (DDAdBlockActive()) return; %orig; }
+- (void)reportAdBrandCardOnClick { if (DDAdBlockActive()) return; %orig; }
+- (id)initWithExptConfig:(id)arg1 { if (DDAdBlockActive()) return nil; return %orig; }
+- (id)getMagicBrushFlutterPlugins { if (DDAdBlockActive()) return nil; return %orig; }
 %end
 
+// 品牌广告服务拦截
 %hook _TtC6WeChat19MagicAdBrandService
-- (void)notifyAdServerInfoEventWithFeedsType:(long long)a adInfo:(id)b { if (fxActive() && fxCfg().brand) return; %orig; }
-- (void)destroyBrandServiceBizWithScene:(id)a { if (fxActive()) return; %orig; }
-- (void)createBrandServiceBizWithScene:(id)a { if (fxActive()) return; %orig; }
-- (void)notifyFrameSetInfoWithMsgId:(id)a frameSetName:(id)b frameSetData:(id)c { if (fxActive()) return; %orig; }
-- (void)notifyStateChangeWithEventName:(id)a { if (fxActive()) return; %orig; }
-- (id)getDynamicCardType { if (fxActive()) return nil; return %orig; }
-- (BOOL)shouldPreLayoutWhenExpose { if (fxActive()) return NO; return %orig; }
-- (BOOL)isBrandTimelineOpen { if (fxActive()) return NO; return %orig; }
-%end
-
-%hook _TtC6WeChat20MagicAdPublicService
-- (void)onJSException:(id)a msg:(id)b extra:(id)c { if (fxActive()) return; %orig; }
-- (void)onDestroy:(id)a { if (fxActive()) return; %orig; }
-- (void)onMainScriptInjected:(id)a { if (fxActive()) return; %orig; }
-%end
-%hook _TtC6WeChat22MagicAdBrandServiceBiz
-- (void)onJSException:(id)a msg:(id)b extra:(id)c { if (fxActive()) return; %orig; }
-- (void)onMainScriptInjected:(id)a { if (fxActive()) return; %orig; }
-%end
-%hook _TtC6WeChat28MagicSclBrandAdFlutterPlugin
-- (void)onDetachedFromEngine:(id)a { if (fxActive()) return; %orig; }
-%end
-
-%hook FlutterBrandTLApiImplementation
-- (id)createMagicAdBrandServiceScene:(id)a error:(id *)b { if (fxActive()) return nil; return %orig; }
-%end
-%hook WCAdFormWebViewJSLogic
-- (id)initWithWebView:(id)a pageInfo:(id)b componentId:(id)c qrExtInfo:(id)d { if (fxActive()) return nil; return %orig; }
+- (void)notifyAdServerInfoEventWithFeedsType:(long long)arg1 adInfo:(id)arg2 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].brand) return; %orig; }
+- (void)destroyBrandServiceBizWithScene:(id)arg1 { if (DDAdBlockActive()) return; %orig; }
+- (void)createBrandServiceBizWithScene:(id)arg1 { if (DDAdBlockActive()) return; %orig; }
+- (void)notifyFrameSetInfoWithMsgId:(id)arg1 frameSetName:(id)arg2 frameSetData:(id)arg3 { if (DDAdBlockActive()) return; %orig; }
+- (void)notifyStateChangeWithEventName:(id)arg1 { if (DDAdBlockActive()) return; %orig; }
+- (id)getDynamicCardType { if (DDAdBlockActive()) return nil; return %orig; }
+- (BOOL)shouldPreLayoutWhenExpose { if (DDAdBlockActive()) return NO; return %orig; }
+- (BOOL)isBrandTimelineOpen { if (DDAdBlockActive()) return NO; return %orig; }
 %end
 
 // 公众号文章广告 DOM/CSS 兜底隐藏
-static NSString *FXAdBlockMPHideCSS(void) {
+static NSString *DDAdBlockArticleAdCSS(void) {
     return @".iframe_ad_container,.iframe_adv_ad_container,.comment-ad-container,"
             "li.cidad_comment_constant_key,#cidad_comment_constant_key,"
             ".adv_keyword_search,.ad_control-tips"
@@ -282,230 +240,237 @@ static NSString *FXAdBlockMPHideCSS(void) {
 }
 
 %hook MMWebViewController
-- (void)webViewDidFinishLoad:(id)a navigation:(id)b {
+- (void)webViewDidFinishLoad:(id)arg1 navigation:(id)arg2 {
     %orig;
-    FXAdBlockConfig *c = fxCfg();
-    if (!(fxActive() && (c.brand || c.network))) return;
+    DDAdBlockConfig *cfg = [DDAdBlockConfig sharedConfig];
+    if (!(DDAdBlockActive() && (cfg.brand || cfg.network))) return;
     WKWebView *wv = nil;
     @try { wv = [(id)self valueForKey:@"webView"]; } @catch (__unused NSException *e) {}
     if (![wv isKindOfClass:[WKWebView class]]) return;
-    [wv evaluateJavaScript:FXAdBlockMPHideCSS() completionHandler:nil];
+    [wv evaluateJavaScript:DDAdBlockArticleAdCSS() completionHandler:nil];
 }
 %end
 
-// ================= 3. 视频号广告（核心修复：评论区不返回 nil） =================
+// ========== 3. 视频号广告拦截（核心修复：评论区不返回 nil） ==========
 %hook WCFinderComment
-- (id)advertisementInfo { if (fxActive() && fxCfg().finder) return nil; return %orig; }
-- (id)commentAdImageUrl { if (fxActive() && fxCfg().finder) return nil; return %orig; }
+- (id)advertisementInfo { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].finder) return nil; return %orig; }
+- (id)commentAdImageUrl { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].finder) return nil; return %orig; }
 %end
 
 %hook FinderObjectAdInfo
-- (id)adDesc { if (fxActive() && fxCfg().finder) return nil; return %orig; }
-- (id)adH5 { if (fxActive() && fxCfg().finder) return nil; return %orig; }
-- (id)adLeadLink { if (fxActive() && fxCfg().finder) return nil; return %orig; }
-- (id)adMiniApp { if (fxActive() && fxCfg().finder) return nil; return %orig; }
-- (id)adItems { if (fxActive() && fxCfg().finder) return nil; return %orig; }
+- (id)adDesc { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].finder) return nil; return %orig; }
+- (id)adH5 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].finder) return nil; return %orig; }
+- (id)adLeadLink { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].finder) return nil; return %orig; }
+- (id)adMiniApp { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].finder) return nil; return %orig; }
+- (id)adItems { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].finder) return nil; return %orig; }
 %end
 
 %hook _TtC6WeChat31MBJsEventOnFinderMediaAdPreload
-- (void)startPreloadAdMedia { if (fxActive() && fxCfg().finder) return; %orig; }
+- (void)startPreloadAdMedia { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].finder) return; %orig; }
 %end
 
 %hook WCFinderCommentDetailViewModel
-// 修复：保留原实现副作用，避免下游状态未初始化导致异常
-- (void)preloadCommentAdResource:(id)a {
-    if (fxActive() && fxCfg().finder) { %orig; return; }
+- (void)preloadCommentAdResource:(id)arg1 {
+    // 保留原实现副作用，避免下游状态未初始化
+    if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].finder) { %orig; return; }
     %orig;
 }
 %end
 
 %hook WCFinderCommentSectionViewModel
-// 核心修复：不返回 nil，保证 UITableView 数据源完整，根治"打开视频号评论闪退"
-- (id)commentSectionViewModelWithRootComment:(id)a {
-    if (fxActive() && fxCfg().finder) return %orig;
+- (id)commentSectionViewModelWithRootComment:(id)arg1 {
+    // 核心修复：不返回 nil，保证 UITableView 数据源完整，根治评论页闪退
+    if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].finder) return %orig;
     return %orig;
 }
 %end
 
 %hook WCAdFinderInfo
-- (BOOL)isValid { if (fxActive() && fxCfg().finder) return NO; return %orig; }
+- (BOOL)isValid { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].finder) return NO; return %orig; }
 %end
 
-// ================= 4. 小程序广告 =================
+// ========== 4. 小程序广告拦截 ==========
 %hook WAAppTaskSplashADConfig
-- (NSNumber *)splashADEnableNumber { if (fxActive() && fxCfg().miniProgram) return @(0); return %orig; }
-- (BOOL)canShowSplashADWindow { if (fxActive() && fxCfg().miniProgram) return NO; return %orig; }
-- (BOOL)splashADHasContent { if (fxActive() && fxCfg().miniProgram) return NO; return %orig; }
-- (BOOL)canHotStartShowSplashAD { if (fxActive() && fxCfg().miniProgram) return NO; return %orig; }
-- (void)handleShowSplashAdCalled:(BOOL)a { if (fxActive() && fxCfg().miniProgram) return; %orig; }
+- (NSNumber *)splashADEnableNumber { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].miniProgram) return @(0); return %orig; }
+- (BOOL)canShowSplashADWindow { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].miniProgram) return NO; return %orig; }
+- (BOOL)splashADHasContent { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].miniProgram) return NO; return %orig; }
+- (BOOL)canHotStartShowSplashAD { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].miniProgram) return NO; return %orig; }
+- (void)handleShowSplashAdCalled:(BOOL)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].miniProgram) return; %orig; }
 %end
 
 %hook WAExptProxy
-+ (BOOL)shouldShowSplashAD { if (fxActive() && fxCfg().miniProgram) return NO; return %orig; }
++ (BOOL)shouldShowSplashAD { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].miniProgram) return NO; return %orig; }
 %end
 
 %hook WAAppTask
-- (BOOL)isSplashADFinished { if (fxActive() && fxCfg().miniProgram) return YES; return %orig; }
+- (BOOL)isSplashADFinished { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].miniProgram) return YES; return %orig; }
 %end
 
 %hook WAJSEventHandler_showSplashAd
-- (void)handleJSEvent:(id)a { if (fxActive() && fxCfg().miniProgram) return; %orig; }
-%end
-%hook WAJSEventHandler_showSplashAdMenu
-- (void)handleJSEvent:(id)a { if (fxActive() && fxCfg().miniProgram) return; %orig; }
+- (void)handleJSEvent:(id)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].miniProgram) return; %orig; }
 %end
 
-// 试玩广告（Playable）秒过
+%hook WAJSEventHandler_showSplashAdMenu
+- (void)handleJSEvent:(id)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].miniProgram) return; %orig; }
+%end
+
+// 试玩广告秒过
 %hook _TtC6WeChat23MagicNewPlayableService
-- (void)startWithConfig:(id)a {
-    if (fxActive() && fxCfg().miniProgram) {
-        %orig(a);
-        SEL s = NSSelectorFromString(@"notifyMiniProgramPlayableStatusWithIsEnd:");
-        if (s) ((void (*)(id, SEL, BOOL))objc_msgSend)((id)self, s, YES);
+- (void)startWithConfig:(id)arg1 {
+    if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].miniProgram) {
+        %orig(arg1);
+        SEL sel = NSSelectorFromString(@"notifyMiniProgramPlayableStatusWithIsEnd:");
+        if (sel) ((void (*)(id, SEL, BOOL))objc_msgSend)((id)self, sel, YES);
         return;
     }
     %orig;
 }
-- (void)notifyMiniProgramPlayableStatusWithIsEnd:(BOOL)a {
-    if (fxActive() && fxCfg().miniProgram) { %orig(YES); return; } %orig;
+- (void)notifyMiniProgramPlayableStatusWithIsEnd:(BOOL)arg1 {
+    if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].miniProgram) { %orig(YES); return; }
+    %orig;
 }
-- (void)onCanvasViewFirstFrameRendered:(unsigned int)a { if (fxActive() && fxCfg().miniProgram) return; %orig; }
-- (void)onMainScriptInjected:(id)a { if (fxActive() && fxCfg().miniProgram) { %orig; return; } %orig; }
-- (void)onDestroy:(id)a { if (fxActive() && fxCfg().miniProgram) { %orig; return; } %orig; }
+- (void)onCanvasViewFirstFrameRendered:(unsigned int)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].miniProgram) return; %orig; }
+- (void)onMainScriptInjected:(id)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].miniProgram) { %orig; return; } %orig; }
+- (void)onDestroy:(id)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].miniProgram) { %orig; return; } %orig; }
 %end
 
 %hook _TtC6WeChat20MagicPlayableService
-- (void)startWithConfig:(id)a {
-    if (fxActive() && fxCfg().miniProgram) {
-        %orig(a);
-        SEL s = NSSelectorFromString(@"notifyMiniProgramPlayableStatusWithIsEnd:");
-        if (s) ((void (*)(id, SEL, BOOL))objc_msgSend)((id)self, s, YES);
+- (void)startWithConfig:(id)arg1 {
+    if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].miniProgram) {
+        %orig(arg1);
+        SEL sel = NSSelectorFromString(@"notifyMiniProgramPlayableStatusWithIsEnd:");
+        if (sel) ((void (*)(id, SEL, BOOL))objc_msgSend)((id)self, sel, YES);
         return;
     }
     %orig;
 }
-- (void)notifyMiniProgramPlayableStatusWithIsEnd:(BOOL)a {
-    if (fxActive() && fxCfg().miniProgram) { %orig(YES); return; } %orig;
+- (void)notifyMiniProgramPlayableStatusWithIsEnd:(BOOL)arg1 {
+    if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].miniProgram) { %orig(YES); return; }
+    %orig;
 }
-- (void)onCanvasViewFirstFrameRendered:(unsigned int)a { if (fxActive() && fxCfg().miniProgram) return; %orig; }
-- (void)onDestroy:(id)a { if (fxActive() && fxCfg().miniProgram) { %orig; return; } %orig; }
+- (void)onCanvasViewFirstFrameRendered:(unsigned int)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].miniProgram) return; %orig; }
+- (void)onDestroy:(id)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].miniProgram) { %orig; return; } %orig; }
 %end
 
+// 试玩广告 JS 桥拦截
 %hook _TtC6WeChat43WAJSEventHandler_predownloadPlayablePackage
-- (void)handleJSEvent:(id)a { if (fxActive() && fxCfg().miniProgram) return; %orig; }
+- (void)handleJSEvent:(id)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].miniProgram) return; %orig; }
 %end
 %hook _TtC6WeChat46WAJSEventHandler_insertMiniProgramPlayableView
-- (void)handleJSEvent:(id)a { if (fxActive() && fxCfg().miniProgram) return; %orig; }
+- (void)handleJSEvent:(id)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].miniProgram) return; %orig; }
 %end
 %hook _TtC6WeChat46WAJSEventHandler_removeMiniProgramPlayableView
-- (void)handleJSEvent:(id)a { if (fxActive() && fxCfg().miniProgram) return; %orig; }
+- (void)handleJSEvent:(id)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].miniProgram) return; %orig; }
 %end
 %hook _TtC6WeChat49WAJSEventHandler_removeMiniProgramPlayableViewNew
-- (void)handleJSEvent:(id)a { if (fxActive() && fxCfg().miniProgram) return; %orig; }
+- (void)handleJSEvent:(id)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].miniProgram) return; %orig; }
 %end
 %hook _TtC6WeChat49WAJSEventHandler_insertMiniProgramPlayableViewNew
-- (void)handleJSEvent:(id)a { if (fxActive() && fxCfg().miniProgram) return; %orig; }
+- (void)handleJSEvent:(id)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].miniProgram) return; %orig; }
 %end
 %hook _TtC6WeChat46MPEventHandler_notifyMiniProgramPlayableStatus
-- (void)invoke:(id)a { if (fxActive() && fxCfg().miniProgram) return; %orig; }
+- (void)invoke:(id)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].miniProgram) return; %orig; }
 %end
 %hook _TtC6WeChat49MBEventHandler_notifyMiniProgramPlayableStatusNew
-- (void)invoke:(id)a { if (fxActive() && fxCfg().miniProgram) return; %orig; }
+- (void)invoke:(id)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].miniProgram) return; %orig; }
 %end
 
+// 开屏广告窗口拦截
 %hook WASplashADWindow
-- (void)showRootViewControllerAnimated:(BOOL)a completion:(id)b {
-    if (fxActive() && fxCfg().miniProgram) {
-        if (b) { @try { ((void (^)(id))b)(nil); } @catch (__unused NSException *e) {} }
+- (void)showRootViewControllerAnimated:(BOOL)arg1 completion:(id)arg2 {
+    if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].miniProgram) {
+        if (arg2) { @try { ((void (^)(id))arg2)(nil); } @catch (__unused NSException *e) {} }
         return;
     }
     %orig;
 }
 %end
 
+// 广告推送拦截
 %hook MagicAdPushMgrService
-- (void)handleAdMsg:(id)a { if (fxActive() && fxCfg().miniProgram) return; %orig; }
-- (void)OnGetNewXmlMsg:(id)a Type:(id)b MsgWrap:(id)c { if (fxActive() && fxCfg().miniProgram) return; %orig; }
+- (void)handleAdMsg:(id)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].miniProgram) return; %orig; }
+- (void)OnGetNewXmlMsg:(id)arg1 Type:(id)arg2 MsgWrap:(id)arg3 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].miniProgram) return; %orig; }
 %end
 
 %hook WCAdvertisePushService
-- (void)handlePushMsg:(id)a { if (fxActive() && fxCfg().miniProgram) return; %orig; }
-- (void)OnGetNewXmlMsg:(id)a Type:(id)b MsgWrap:(id)c { if (fxActive() && fxCfg().moments) return; %orig; }
+- (void)handlePushMsg:(id)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].miniProgram) return; %orig; }
+- (void)OnGetNewXmlMsg:(id)arg1 Type:(id)arg2 MsgWrap:(id)arg3 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].moments) return; %orig; }
 %end
 
-// ================= 5. 网络层广告拦截 =================
-static NSString * const kFXAdURLPattern = @"advert_group|getadvert|getAdPreloadData|ad_posid|_ads_|/ads_|advertisement_";
-static BOOL FXURLIsAd(NSURL *url) {
+// ========== 5. 网络层广告拦截 ==========
+static NSString * const kDDAdBlockAdURLPattern = @"advert_group|getadvert|getAdPreloadData|ad_posid|_ads_|/ads_|advertisement_";
+static BOOL DDAdBlockURLIsAdRequest(NSURL *url) {
     if (!url) return NO;
     NSString *s = [url absoluteString];
     if (s.length == 0) return NO;
+    // 跳过激励广告请求，避免误伤正常业务
     if ([s rangeOfString:@"reward" options:NSCaseInsensitiveSearch].location != NSNotFound) return NO;
-    return [s rangeOfString:kFXAdURLPattern options:NSRegularExpressionSearch].location != NSNotFound;
+    return [s rangeOfString:kDDAdBlockAdURLPattern options:NSRegularExpressionSearch].location != NSNotFound;
 }
 
 %hook NSURLSession
-- (id)dataTaskWithRequest:(NSURLRequest *)a completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))b {
-    FXAdBlockConfig *c = fxCfg();
-    if (fxActive() && (c.network || c.miniProgram) && !c.rewardedFastPass && FXURLIsAd([a URL])) {
+- (id)dataTaskWithRequest:(NSURLRequest *)arg1 completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))arg2 {
+    DDAdBlockConfig *cfg = [DDAdBlockConfig sharedConfig];
+    if (DDAdBlockActive() && (cfg.network || cfg.miniProgram) && !cfg.rewardedFastPass && DDAdBlockURLIsAdRequest([arg1 URL])) {
         NSURLRequest *dr = [NSURLRequest requestWithURL:[NSURL URLWithString:@"data:text/plain;charset=utf-8,"]];
-        return %orig(dr, b);
+        return %orig(dr, arg2);
     }
     return %orig;
 }
-- (id)dataTaskWithRequest:(NSURLRequest *)a {
-    FXAdBlockConfig *c = fxCfg();
-    if (fxActive() && (c.network || c.miniProgram) && !c.rewardedFastPass && FXURLIsAd([a URL])) {
+- (id)dataTaskWithRequest:(NSURLRequest *)arg1 {
+    DDAdBlockConfig *cfg = [DDAdBlockConfig sharedConfig];
+    if (DDAdBlockActive() && (cfg.network || cfg.miniProgram) && !cfg.rewardedFastPass && DDAdBlockURLIsAdRequest([arg1 URL])) {
         NSURLRequest *dr = [NSURLRequest requestWithURL:[NSURL URLWithString:@"data:text/plain;charset=utf-8,"]];
         return %orig(dr);
     }
     return %orig;
 }
-- (id)uploadTaskWithRequest:(NSURLRequest *)a fromData:(NSData *)b completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))c {
-    FXAdBlockConfig *cf = fxCfg();
-    if (fxActive() && (cf.network || cf.miniProgram) && !cf.rewardedFastPass && FXURLIsAd([a URL])) {
+- (id)uploadTaskWithRequest:(NSURLRequest *)arg1 fromData:(NSData *)arg2 completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))arg3 {
+    DDAdBlockConfig *cfg = [DDAdBlockConfig sharedConfig];
+    if (DDAdBlockActive() && (cfg.network || cfg.miniProgram) && !cfg.rewardedFastPass && DDAdBlockURLIsAdRequest([arg1 URL])) {
         NSURLRequest *dr = [NSURLRequest requestWithURL:[NSURL URLWithString:@"data:text/plain;charset=utf-8,"]];
-        return %orig(dr, b, c);
+        return %orig(dr, arg2, arg3);
     }
     return %orig;
 }
 %end
 
-// ================= 6. 直播广告 =================
+// ========== 6. 直播广告拦截 ==========
 %hook WCFinderAdCountdownBannerView
-- (BOOL)adHasPlayOver { if (fxActive() && fxCfg().live) return YES; return %orig; }
-- (id)initWithFrame:(CGRect)a countdownNum:(long long)b {
-    if (fxActive() && fxCfg().miniProgram && b > 1) return %orig(a, 1);
+- (BOOL)adHasPlayOver { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].live) return YES; return %orig; }
+- (id)initWithFrame:(CGRect)arg1 countdownNum:(long long)arg2 {
+    if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].miniProgram && arg2 > 1) return %orig(arg1, 1);
     return %orig;
 }
 %end
 
-// ================= 7. 搜索广告 =================
+// ========== 7. 搜索广告拦截 ==========
 %hook WCAdSearchH5Info
-+ (id)fromXML:(struct XmlReaderNode_t *)a { if (fxActive() && fxCfg().search) return nil; return %orig; }
-- (int)adType { if (fxActive() && fxCfg().moments) return 0; return %orig; }
++ (id)fromXML:(struct XmlReaderNode_t *)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].search) return nil; return %orig; }
+- (int)adType { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].moments) return 0; return %orig; }
 %end
 
-// ================= 8. 激励广告快速跳过 =================
+// ========== 8. 激励广告快速跳过 ==========
 %hook WCFinderRewardAdViewController
-- (BOOL)adHasPlayOver { if (fxActive() && fxCfg().rewardedFastPass) return YES; return %orig; }
+- (BOOL)adHasPlayOver { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].rewardedFastPass) return YES; return %orig; }
 %end
 
-// ================= 9. 广告上报抑制 =================
+// ========== 9. 广告上报拦截 ==========
 %hook WCAdvertiseStatMgr
-- (id)getAdvertiseInfoForItem:(id)a { if (fxActive()) return nil; return %orig; }
-- (void)logHeadImageH5:(id)a { if (fxActive()) return; %orig; }
-- (void)logADBrandProfile:(id)a { if (fxActive()) return; %orig; }
-- (void)logADFloatView:(id)a { if (fxActive()) return; %orig; }
-- (void)logADPoiH5:(id)a { if (fxActive()) return; %orig; }
-- (void)logADH5:(id)a withUserInfo:(id)b reportType:(unsigned long long)c { if (fxActive()) return; %orig; }
-- (void)logADH5:(id)a { if (fxActive() && fxCfg().moments) return; %orig; }
-- (void)logADDetail:(id)a dataItem:(id)b { if (fxActive() && fxCfg().moments) return; %orig; }
-- (void)logSphereViewWithSphereReportInfo:(id)a dataItem:(id)b scene:(id)c { if (fxActive() && fxCfg().moments) return; %orig; }
-- (void)logSphereViewInDetailWithWrapInfo:(id)a dataItem:(id)b { if (fxActive() && fxCfg().moments) return; %orig; }
-- (void)logSphereViewInTimeLineWithWrapInfo:(id)a dataItem:(id)b { if (fxActive() && fxCfg().moments) return; %orig; }
+- (id)getAdvertiseInfoForItem:(id)arg1 { if (DDAdBlockActive()) return nil; return %orig; }
+- (void)logHeadImageH5:(id)arg1 { if (DDAdBlockActive()) return; %orig; }
+- (void)logADBrandProfile:(id)arg1 { if (DDAdBlockActive()) return; %orig; }
+- (void)logADFloatView:(id)arg1 { if (DDAdBlockActive()) return; %orig; }
+- (void)logADPoiH5:(id)arg1 { if (DDAdBlockActive()) return; %orig; }
+- (void)logADH5:(id)arg1 withUserInfo:(id)arg2 reportType:(unsigned long long)arg3 { if (DDAdBlockActive()) return; %orig; }
+- (void)logADH5:(id)arg1 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].moments) return; %orig; }
+- (void)logADDetail:(id)arg1 dataItem:(id)arg2 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].moments) return; %orig; }
+- (void)logSphereViewWithSphereReportInfo:(id)arg1 dataItem:(id)arg2 scene:(id)arg3 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].moments) return; %orig; }
+- (void)logSphereViewInDetailWithWrapInfo:(id)arg1 dataItem:(id)arg2 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].moments) return; %orig; }
+- (void)logSphereViewInTimeLineWithWrapInfo:(id)arg1 dataItem:(id)arg2 { if (DDAdBlockActive() && [DDAdBlockConfig sharedConfig].moments) return; %orig; }
 %end
 
-// ================= 设置界面 =================
+// ========== 设置界面 ==========
 @interface WCTableViewManager : NSObject
 - (id)initWithFrame:(CGRect)frame style:(NSInteger)style;
 @property (nonatomic, readonly) UITableView *tableView;
@@ -513,74 +478,86 @@ static BOOL FXURLIsAd(NSURL *url) {
 - (void)addSection:(id)arg1;
 - (void)reloadTableView;
 @end
+
 @interface WCTableViewSectionManager : NSObject
 + (id)sectionWithHeader:(NSString *)header;
 - (void)addCell:(id)arg1;
 @end
+
 @interface WCTableViewCellManager : NSObject
 + (id)switchCellForSel:(SEL)sel target:(id)target title:(id)title on:(BOOL)on;
 @end
 
-@interface FXAdBlockSettingsViewController : UIViewController
+@interface DDAdBlockSettingsViewController : UIViewController
 @property (nonatomic, strong) WCTableViewManager *tableViewManager;
 @end
 
-@implementation FXAdBlockSettingsViewController
+@implementation DDAdBlockSettingsViewController
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"FX广告拦截";
+    self.title = @"DD广告拦截";
     self.view.backgroundColor = [UIColor systemBackgroundColor];
-    Class mc = %c(WCTableViewManager);
-    _tableViewManager = [[mc alloc] initWithFrame:self.view.bounds style:UITableViewStyleInsetGrouped];
+
+    Class managerCls = %c(WCTableViewManager);
+    _tableViewManager = [[managerCls alloc] initWithFrame:self.view.bounds style:UITableViewStyleInsetGrouped];
     _tableViewManager.tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     _tableViewManager.tableView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentAutomatic;
     [self.view addSubview:_tableViewManager.tableView];
+
     [self buildTable];
 }
+
 - (void)buildTable {
     [_tableViewManager clearAllSection];
-    Class sc = %c(WCTableViewSectionManager), cc = %c(WCTableViewCellManager);
-    FXAdBlockConfig *c = fxCfg();
-    WCTableViewSectionManager *sm = [sc sectionWithHeader:@"FX广告拦截 v1.0.0"];
-    [sm addCell:[cc switchCellForSel:@selector(onMaster:) target:self title:@"启用广告拦截" on:c.master]];
-    [_tableViewManager addSection:sm];
-    if (c.master) {
-        WCTableViewSectionManager *s1 = [sc sectionWithHeader:@"广告拦截场景"];
-        [s1 addCell:[cc switchCellForSel:@selector(onMoments:) target:self title:@"屏蔽朋友圈广告" on:c.moments]];
-        [s1 addCell:[cc switchCellForSel:@selector(onBrand:) target:self title:@"屏蔽公众号广告" on:c.brand]];
-        [s1 addCell:[cc switchCellForSel:@selector(onFinder:) target:self title:@"屏蔽视频号广告" on:c.finder]];
-        [s1 addCell:[cc switchCellForSel:@selector(onLive:) target:self title:@"屏蔽直播广告" on:c.live]];
-        [s1 addCell:[cc switchCellForSel:@selector(onMini:) target:self title:@"屏蔽小程序广告" on:c.miniProgram]];
-        [_tableViewManager addSection:s1];
-        WCTableViewSectionManager *s2 = [sc sectionWithHeader:@"进阶拦截"];
-        [s2 addCell:[cc switchCellForSel:@selector(onNetwork:) target:self title:@"网络层广告拦截" on:c.network]];
-        [s2 addCell:[cc switchCellForSel:@selector(onSearch:) target:self title:@"屏蔽搜索广告" on:c.search]];
-        [s2 addCell:[cc switchCellForSel:@selector(onRewarded:) target:self title:@"激励广告快速跳过" on:c.rewardedFastPass]];
-        [s2 addCell:[cc switchCellForSel:@selector(onExpt:) target:self title:@"实验开关广告抑制" on:c.expt]];
-        [_tableViewManager addSection:s2];
+    Class sectionCls = %c(WCTableViewSectionManager);
+    Class cellCls = %c(WCTableViewCellManager);
+    DDAdBlockConfig *cfg = [DDAdBlockConfig sharedConfig];
+
+    WCTableViewSectionManager *secMaster = [sectionCls sectionWithHeader:@"DD广告拦截 v1.0.0"];
+    [secMaster addCell:[cellCls switchCellForSel:@selector(onMasterSwitch:) target:self title:@"启用广告拦截" on:cfg.master]];
+    [_tableViewManager addSection:secMaster];
+
+    if (cfg.master) {
+        WCTableViewSectionManager *secMain = [sectionCls sectionWithHeader:@"广告拦截场景"];
+        [secMain addCell:[cellCls switchCellForSel:@selector(onMomentsSwitch:) target:self title:@"屏蔽朋友圈广告" on:cfg.moments]];
+        [secMain addCell:[cellCls switchCellForSel:@selector(onBrandSwitch:) target:self title:@"屏蔽公众号广告" on:cfg.brand]];
+        [secMain addCell:[cellCls switchCellForSel:@selector(onFinderSwitch:) target:self title:@"屏蔽视频号广告" on:cfg.finder]];
+        [secMain addCell:[cellCls switchCellForSel:@selector(onLiveSwitch:) target:self title:@"屏蔽直播广告" on:cfg.live]];
+        [secMain addCell:[cellCls switchCellForSel:@selector(onMiniProgramSwitch:) target:self title:@"屏蔽小程序广告" on:cfg.miniProgram]];
+        [_tableViewManager addSection:secMain];
+
+        WCTableViewSectionManager *secAdv = [sectionCls sectionWithHeader:@"进阶拦截"];
+        [secAdv addCell:[cellCls switchCellForSel:@selector(onNetworkSwitch:) target:self title:@"网络层广告拦截" on:cfg.network]];
+        [secAdv addCell:[cellCls switchCellForSel:@selector(onSearchSwitch:) target:self title:@"屏蔽搜索广告" on:cfg.search]];
+        [secAdv addCell:[cellCls switchCellForSel:@selector(onRewardedSwitch:) target:self title:@"激励广告快速跳过" on:cfg.rewardedFastPass]];
+        [secAdv addCell:[cellCls switchCellForSel:@selector(onExptSwitch:) target:self title:@"实验开关广告抑制" on:cfg.expt]];
+        [_tableViewManager addSection:secAdv];
     }
     [_tableViewManager reloadTableView];
 }
-- (void)onMaster:(UISwitch *)s { fxCfg().master = s.isOn; [self buildTable]; }
-- (void)onMoments:(UISwitch *)s { fxCfg().moments = s.isOn; }
-- (void)onBrand:(UISwitch *)s { fxCfg().brand = s.isOn; }
-- (void)onFinder:(UISwitch *)s { fxCfg().finder = s.isOn; }
-- (void)onLive:(UISwitch *)s { fxCfg().live = s.isOn; }
-- (void)onMini:(UISwitch *)s { fxCfg().miniProgram = s.isOn; }
-- (void)onNetwork:(UISwitch *)s { fxCfg().network = s.isOn; }
-- (void)onSearch:(UISwitch *)s { fxCfg().search = s.isOn; }
-- (void)onRewarded:(UISwitch *)s { fxCfg().rewardedFastPass = s.isOn; }
-- (void)onExpt:(UISwitch *)s { fxCfg().expt = s.isOn; }
+
+- (void)onMasterSwitch:(UISwitch *)s { [DDAdBlockConfig sharedConfig].master = s.isOn; [self buildTable]; }
+- (void)onMomentsSwitch:(UISwitch *)s { [DDAdBlockConfig sharedConfig].moments = s.isOn; }
+- (void)onBrandSwitch:(UISwitch *)s { [DDAdBlockConfig sharedConfig].brand = s.isOn; }
+- (void)onFinderSwitch:(UISwitch *)s { [DDAdBlockConfig sharedConfig].finder = s.isOn; }
+- (void)onLiveSwitch:(UISwitch *)s { [DDAdBlockConfig sharedConfig].live = s.isOn; }
+- (void)onMiniProgramSwitch:(UISwitch *)s { [DDAdBlockConfig sharedConfig].miniProgram = s.isOn; }
+- (void)onNetworkSwitch:(UISwitch *)s { [DDAdBlockConfig sharedConfig].network = s.isOn; }
+- (void)onSearchSwitch:(UISwitch *)s { [DDAdBlockConfig sharedConfig].search = s.isOn; }
+- (void)onRewardedSwitch:(UISwitch *)s { [DDAdBlockConfig sharedConfig].rewardedFastPass = s.isOn; }
+- (void)onExptSwitch:(UISwitch *)s { [DDAdBlockConfig sharedConfig].expt = s.isOn; }
 @end
 
-// ================= 插件注册 =================
+// ========== 插件注册 ==========
 %ctor {
     @autoreleasepool {
-        Class mc = NSClassFromString(@"WCPluginsMgr");
-        if (mc) {
-            id mgr = [mc sharedInstance];
+        Class mgrClass = NSClassFromString(@"WCPluginsMgr");
+        if (mgrClass) {
+            id mgr = [mgrClass sharedInstance];
             if ([mgr respondsToSelector:@selector(registerControllerWithTitle:version:controller:)]) {
-                [mgr registerControllerWithTitle:@"FX广告拦截" version:@"1.0.0" controller:@"FXAdBlockSettingsViewController"];
+                [mgr registerControllerWithTitle:@"DD广告拦截"
+                                         version:@"1.0.0"
+                                      controller:@"DDAdBlockSettingsViewController"];
             }
         }
     }
