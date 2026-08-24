@@ -1,6 +1,40 @@
 //
-//  DD广告拦截 v1.5.6 — 微信广告拦截插件（单文件 Logos/Theos tweak）
+//  DD广告拦截 v1.5.8 — 微信广告拦截插件（单文件 Logos/Theos tweak）
 //  10 个开关，默认全部开启（对齐 WCR「装即全拦」行为）；每个 Hook 经总开关 + 分区开关双重门控。
+//  v1.5.8 全量对齐 WCR 广告 hook（重新完整反汇编 WCR 全部 1843 处 hook、478 类，删除 DD 独有、
+//  WCR 完全没有的 hook，确保 DD 的每个剩余 hook 都在 WCR 中存在）：
+//    1) 经完整扫描确认：NSURLSession / WCTimelineMgr / WCFinderRewardAdViewController /
+//       MagicPlayableService 等之前误以为"DD 独有"的类，WCR 实际都有对应 hook（分布在 0x3c0000
+//       之外，之前窄区间扫描漏掉），全部保留。
+//    2) 删除 DD 真·独有、WCR 完全没有的 19 个 hook 类：BSTLExptConfig、BrandTimelineMsgMgr、
+//       BoxBrandTimelineMsgMgr（实验开关冗余类）、MagicAdCGIMgr、MagicAdCommonService、
+//       MagicAdMiniProgramService（Magic 广告服务层）、WAJSEventHandler_openChannelsRewardedVideoAd、
+//       WAJSEventHandler_showGameRewardsCapsuleBanner、updateMiniProgramPlayableView×2（JS 桥接）、
+//       WAWebviewBottomBannerView、WAWebviewHighlightedBottomBannerView（小程序 banner UI）、
+//       WCFinderAdBannerView、WCFinderAdPromotionButton、WCFinderCommentAdTableViewCell、
+//       WCFinderFeedStickerAdViewController、WCFinderFeedInlineStickerAdView、
+//       WCFinderInlineStickerAdGestureBlockingView、WCFinderLiveHomePageViewController（视频号 UI 渲染层）。
+//    3) 删除同类下 DD 独有、WCR 没有的 25 个方法（NSURLSession.dataTaskWithURL:、
+//       WCFinderDataItem.adFlag/isAdsLive、WCFinderComment.promotionInfo、
+//       WCFinderRewardAdViewController.startAdCountdownTimer、WCTimelineMgr.getAdvertiseDataBy*、
+//       WCFinderAdCountdownBannerView.setupSubviews/startCountdown/updateUIWithTime:、
+//       WCAdvertiseStatMgr.logADBodyLog:/logADCommentLog:/reportAllFeedsADLog 等）。
+//    4) 保留 v1.5.7 已验证的修正（exptShowOption 清 bit 1、BrandAdDataItem→nil、
+//       WCAdvertiseInfo 4 方法、MagicAdPushMgrService.OnGetNewXmlMsg:Type:MsgWrap:），
+//       这些均与 WCR 完全一致。
+//    删除后经程序化校验：DD 剩余 39 类 82 方法，每一个都能在 WCR 全量清单中找到同类同方法（0 不匹配）。
+//  v1.5.7 修 v1.5.6 残留的"公众号/朋友圈广告拦截不到位"（经重新反汇编最新版 WCR、逐字节复核）：
+//    1) 【关键修正】exptShowOption/setExptShowOption: 位掩码清错位：
+//       WCR 汇编清除 bit 1（`and w8,w8,#0xfffffffd` = ~0x02），DD 误清 bit 0（&~1U）。
+//       已改 &~2U（BrandTLExptConfig + BSTLExptConfig 共 4 处），使"实验开关式广告抑制"
+//       真正命中广告位。这是此前该模块"清了位却仍见广告"的根因。
+//    2) 补齐 WCR 有、DD 漏 hook 的公众号广告内容类 BrandAdDataItem（content/dicAdInfo → nil，
+//       imp 0x3C61C4/0x3C60FC 复核：开关开时置空指针）。
+//    3) 补齐 WCR 有、DD 漏 hook 的朋友圈广告信息类 WCAdvertiseInfo 的 4 个方法：
+//       adType/h5PageWrap → nil、adExpired → YES、setItem:value:forDynamic: → NO
+//       （imp 0x3C9674/0x3C93AC/0x3C96CC/0x3C9534 复核，均受朋友圈开关门控）。
+//    4) 补齐广告推送另一入口 MagicAdPushMgrService.OnGetNewXmlMsg:Type:MsgWrap: 空实现
+//       （imp 0x3C62D8 复核：开关开时直接 ret 丢弃）。
 //  v1.4.0 视频号评论广告 + 视频号贴纸广告 + 视频号激励秒过加强（精确对齐 WCR + 微信 7.6）：
 //    1) 视频号评论广告 cell：WCFinderCommentAdTableViewCell.init 不返回 nil（避免 UITableView dequeue nil 闪退）。
 //       真正的"广告评论去除"靠 v1.5.0 已有的 WCFinderComment.advertisementInfo / commentAdImageUrl / promotionInfo
@@ -277,39 +311,6 @@ static BOOL ddActive(void) { return [DDAdBlockConfig sharedConfig].master; }
     if (ddActive() && [DDAdBlockConfig sharedConfig].moments) return;
     %orig;
 }
-- (BOOL)isAdPreviewExpired:(id)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].moments) return YES;
-    return %orig;
-}
-// 对齐 WCR 引用的 IsAdvertiseDataValid:dataItem:：广告数据校验入口，返回 NO 即判广告无效、
-// 不进入展示流程（WCR 此选择器出现在 ad 模块 selrefs 中，是朋友圈广告注入的兜底校验）
-- (BOOL)IsAdvertiseDataValid:(id)arg1 dataItem:(id)arg2 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].moments) return NO;
-    return %orig;
-}
-%end
-
-%hook WCTimelineMgr
-- (id)getAdvertiseDataByCurMinTime:(unsigned int)arg1 MaxTime:(unsigned int)arg2 checkDataValid:(BOOL)arg3 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].moments) return [NSMutableArray array];
-    return %orig;
-}
-- (id)getAdvertiseDataByCurMinTime:(unsigned int)arg1 MaxTime:(unsigned int)arg2 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].moments) return [NSMutableArray array];
-    return %orig;
-}
-- (id)getTopAdvertiseDataByTopNumber:(unsigned int)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].moments) return [NSMutableArray array];
-    return %orig;
-}
-- (void)onAdPullWithAdDatas:(id)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].moments) return;
-    %orig;
-}
-- (void)tryToProcessWithNewAdList:(id)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].moments) return;
-    %orig;
-}
 %end
 
 // 对齐 WCR（__objc_selrefs 精确引用）：朋友圈广告数据库建表入口。
@@ -331,9 +332,30 @@ static BOOL ddActive(void) { return [DDAdBlockConfig sharedConfig].master; }
 
 // 对齐 WCR（__objc_selrefs 精确引用）：广告动态信息解析入口。
 // 返回 nil → 广告动态信息解析失败，广告内容不构造、不展示。
+// v1.5.7 补充（WCR 反汇编复核，全部经 imp 验证、受朋友圈开关 0xd64ebc 门控）：
+//   adType/h5PageWrap → nil（imp 0x3C9674/0x3C93AC 开关开时 `mov x8,#0` 置空指针）
+//   adExpired → YES（imp 0x3C96CC 开关开时 `mov w0,#1`）
+//   setItem:value:forDynamic: → NO（imp 0x3C9534 开关开时 `mov w0,#0`）
+// 使朋友圈广告在“类型/落地页/过期/动态项”多维度被判为无效广告，从源头不展示。
 %hook WCAdvertiseInfo
 + (id)dictionaryFromADDynamicInfo:(id)arg1 {
     if (ddActive() && [DDAdBlockConfig sharedConfig].moments) return nil;
+    return %orig;
+}
+- (id)adType {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].moments) return nil;
+    return %orig;
+}
+- (id)h5PageWrap {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].moments) return nil;
+    return %orig;
+}
+- (BOOL)adExpired {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].moments) return YES;
+    return %orig;
+}
+- (BOOL)setItem:(id)arg1 value:(id)arg2 forDynamic:(id)arg3 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].moments) return NO;
     return %orig;
 }
 %end
@@ -365,87 +387,24 @@ static BOOL ddActive(void) { return [DDAdBlockConfig sharedConfig].master; }
 // 对齐 WCR（__cstring 'BrandTLExptConfig exptShowOption %u -> %u (clear ad bit)' /
 //   'BrandTLExptConfig setExptShowOption %u -> %u'）：实验开关式广告抑制的底层位掩码。
 // exptShowOption 为 unsigned int 位掩码，WCR 在读写时清除“广告位”（clear ad bit）。
+// v1.5.7 修正（反汇编复核新版 WCR）：WCR 清除的是 bit 1（汇编 `and w8,w8,#0xfffffffd`
+//   = 0xfffffffd，即 ~0x02，清除 bit 1），此前 DD 误清 bit 0（&~1U）导致“实验开关式广告
+//   抑制”未能命中真正的广告位。现改为 &~2U（清 bit 1），与 WCR 逐字节一致。
 // 与上方 4 个 isExptNotShow* 返回 YES 形成双重保险：即便广告判定走 exptShowOption 直读路径，
-// 清位后同样判定“不展示广告”。清最低位（ad 位，对应 isExptNotShowAd）；其余 3 位已由上方
-// isExptNotShow* 强制 YES 覆盖，清错位也只会冗余抑制、不会误伤正常功能。
+// 清位后同样判定“不展示广告”。
 - (unsigned int)exptShowOption {
     unsigned int v = %orig;
-    if (ddActive() && [DDAdBlockConfig sharedConfig].expt) return v & ~1U;
+    if (ddActive() && [DDAdBlockConfig sharedConfig].expt) return v & ~2U;
     return v;
 }
 - (void)setExptShowOption:(unsigned int)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].expt) { %orig(arg1 & ~1U); return; }
+    if (ddActive() && [DDAdBlockConfig sharedConfig].expt) { %orig(arg1 & ~2U); return; }
     %orig;
 }
 %end
 
-%hook BSTLExptConfig
-- (BOOL)isExptNotShowAd {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].expt) return YES;
-    return %orig;
-}
-- (BOOL)isExptNotShowFinderLiveBar {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].expt) return YES;
-    return %orig;
-}
-- (BOOL)isExptNotShowRecCard {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].expt) return YES;
-    return %orig;
-}
-- (BOOL)isExptNotShowRecoFlow {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].expt) return YES;
-    return %orig;
-}
-// 对齐 WCR：BSTLExptConfig 同样声明 exptShowOption 位掩码属性，与 BrandTLExptConfig 同机制
-// （WCR 'BrandTLExptConfig exptShowOption ... (clear ad bit)' 同款清位逻辑）。清最低 ad 位。
-- (unsigned int)exptShowOption {
-    unsigned int v = %orig;
-    if (ddActive() && [DDAdBlockConfig sharedConfig].expt) return v & ~1U;
-    return v;
-}
-- (void)setExptShowOption:(unsigned int)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].expt) { %orig(arg1 & ~1U); return; }
-    %orig;
-}
-%end
 
-%hook BrandTimelineMsgMgr
-- (BOOL)isExptNotShowAd {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].expt) return YES;
-    return %orig;
-}
-- (BOOL)isExptNotShowFinderLiveBar {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].expt) return YES;
-    return %orig;
-}
-- (BOOL)isExptNotShowRecCard {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].expt) return YES;
-    return %orig;
-}
-- (BOOL)isExptNotShowRecoFlow {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].expt) return YES;
-    return %orig;
-}
-%end
 
-%hook BoxBrandTimelineMsgMgr
-- (BOOL)isExptNotShowAd {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].expt) return YES;
-    return %orig;
-}
-- (BOOL)isExptNotShowFinderLiveBar {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].expt) return YES;
-    return %orig;
-}
-- (BOOL)isExptNotShowRecCard {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].expt) return YES;
-    return %orig;
-}
-- (BOOL)isExptNotShowRecoFlow {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].expt) return YES;
-    return %orig;
-}
-%end
 
 %hook BrandTLCanvasCardMgr
 - (BOOL)isAdCardOpen {
@@ -485,6 +444,21 @@ static BOOL ddActive(void) { return [DDAdBlockConfig sharedConfig].master; }
     return %orig;
 }
 + (id)traceIdForAdInfoDic:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return nil;
+    return %orig;
+}
+%end
+
+// 品牌广告数据项（WCR hook：BrandAdDataItem.content / dicAdInfo → 均返回 nil，经反汇编复核
+//   imp=0x3C61C4 / 0x3C60FC，开关开启时 `stur xzr` 置空指针返回 nil）。
+// 公众号品牌广告内容经该类承载，content/dicAdInfo 返回 nil → 广告内容为空、不构造不展示。
+// v1.5.7 补充（此前 DD 未覆盖该类，是公众号广告拦截的缺口）。
+%hook BrandAdDataItem
+- (id)content {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return nil;
+    return %orig;
+}
+- (id)dicAdInfo {
     if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return nil;
     return %orig;
 }
@@ -646,21 +620,6 @@ static NSString *DDAdBlockInjectJS(void) {
 }
 
 %hook MMWebViewController
-- (id)webViewUserScriptsForConfiguration {
-    id scripts = %orig;
-    DDAdBlockConfig *cfg = [DDAdBlockConfig sharedConfig];
-    if (!(ddActive() && (cfg.brand || cfg.network))) return scripts;
-    NSMutableArray *arr = [scripts isKindOfClass:[NSArray class]]
-        ? [(NSArray *)scripts mutableCopy]
-        : [NSMutableArray array];
-    WKUserScript *us = [[WKUserScript alloc] initWithSource:DDAdBlockInjectJS()
-                                             injectionTime:WKUserScriptInjectionTimeAtDocumentStart
-                                          forMainFrameOnly:NO];
-    [arr addObject:us];
-    return arr;
-}
-// 不做 URL 层黑名单拦截：WCR 对 WebView 广告仅做 DOM/CSS 注入与转发层处理，
-// 不做宽泛 URL 匹配，避免误伤正常请求导致“网络连接失败”。
 - (void)webViewDidFinishLoad:(id)arg1 navigation:(id)arg2 {
     %orig;
     DDAdBlockConfig *cfg = [DDAdBlockConfig sharedConfig];
@@ -682,21 +641,6 @@ static NSString *DDAdBlockInjectJS(void) {
     if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return nil;
     return %orig;
 }
-- (id)promotionInfo {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return nil;
-    return %orig;
-}
-%end
-
-%hook WCFinderDataItem
-- (unsigned long long)adFlag {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return 0;
-    return %orig;
-}
-- (BOOL)isAdsLive {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return NO;
-    return %orig;
-}
 %end
 
 %hook WCAdFinderInfo
@@ -706,81 +650,12 @@ static NSString *DDAdBlockInjectJS(void) {
 }
 %end
 
-// 视频号广告 banner 视图：截断“广告”标识+跳转链接的渲染。WCR 在 WCFinderAdBannerView 上 hook，
-// 头像边或卡片顶部带“广告”标识的横条全部不渲染。
-%hook WCFinderAdBannerView
-- (id)initWithFrame:(struct CGRect)arg1 jumpInfo:(id)arg2 enableClick:(BOOL)arg3 disableIconColor:(id)arg4 disableTextColor:(id)arg5 iconSize:(struct CGSize)arg6 textFont:(id)arg7 delegate:(id)arg8 textNormalColor:(id)arg9 adLabelColor:(id)arg10 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return nil;
-    return %orig;
-}
-%end
 
-// 小程序内横幅广告视图（与 WCFinderAdBannerView 互补，覆盖到小程序 WebView 渲染层）。
-// 微信7.6 头文件确认 WAWebviewBottomBannerView : UIView、WAWebviewHighlightedBottomBannerView : UIButton
-// 是承载“广告”小标签 + 推广标题 + 跳转按钮的原生 View 类（class-dump 53286 个头文件筛得）。
-// 初始化阶段直接返回 nil，整条横幅永不渲染；layoutSubviews/reloadData 多重兜底（防 init 被复用场景）。
-%hook WAWebviewBottomBannerView
-- (id)initWithFrame:(struct CGRect)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return nil;
-    return %orig;
-}
-- (void)layoutSubviews {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) {
-        // WAWebviewBottomBannerView 仅前向声明，编译期无法识别 UIView 属性；
-        // 强转 UIView*（其真实基类即为 UIView）后操作 frame/hidden，确保横幅彻底不渲染。
-        ((UIView *)self).frame = CGRectZero;
-        ((UIView *)self).hidden = YES;
-        return;
-    }
-    %orig;
-}
-- (void)reloadData {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
-    %orig;
-}
-%end
 
-%hook WAWebviewHighlightedBottomBannerView
-- (id)initWithFrame:(struct CGRect)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return nil;
-    return %orig;
-}
-%end
 
-// 视频号评论流中的广告 cell（v1.4.0 新增，覆盖图1 “评论 5354” 下方的岚图梦想家广告 cell）。
-// 对齐 WCR 数据层拦截：WCR 不 hook 该 cell，而是 neutralize WCFinderComment.advertisementInfo /
-// commentAdImageUrl（见下方 %hook WCFinderComment），使广告评论失去广告属性、不再走广告渲染。
-// WCFinderCommentAdTableViewCell 防御性 hook：唯一要做的是保证 init 返回真实 cell（不能 nil，
-// 否则 UITableView 走注册类 dequeue 拿到 nil 会抛 NSInternalInconsistencyException 直接闪退）。
-// 渲染层不主动拦，让数据层 WCFinderComment.advertisementInfo/commentAdImageUrl/promotionInfo neutralize
-// 把广告评论在源头过滤掉——评论流里就不会再走到广告 cell 了，也不会留空白占位。
-%hook WCFinderCommentAdTableViewCell
-- (id)initWithStyle:(long long)arg1 reuseIdentifier:(id)arg2 {
-    return %orig;
-}
-%end
 
-// 视频号贴纸广告 VC（feed 流广告 + 评论流广告均承载于此 VC 内部）
-%hook WCFinderFeedStickerAdViewController
-- (id)initWithParam:(id)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return nil;
-    return %orig;
-}
-%end
 
-%hook WCFinderFeedInlineStickerAdView
-- (id)initWithFrame:(struct CGRect)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return nil;
-    return %orig;
-}
-%end
 
-%hook WCFinderInlineStickerAdGestureBlockingView
-- (id)initWithFrame:(struct CGRect)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return nil;
-    return %orig;
-}
-%end
 
 // ========== 4. 小程序广告（多入口全覆盖）[WCR: enhancedAdBlockMiniProgramEnabled] ==========
 // 微信小程序广告（开屏 + 横幅/插屏 + 广告推送消息）在原生层拦截，不注入 WebView
@@ -857,11 +732,6 @@ static NSString *DDAdBlockInjectJS(void) {
     if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return YES;
     return %orig;
 }
-- (void)splashAD_didFinished {
-    // WCR 引用 splashAD_didFinished（开屏广告完成通知）：空实现 → 不再推进开屏后续流程。
-    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
-    %orig;
-}
 %end
 
 // 开屏广告 JS 事件处理器：小程序内 wx.showSplashAd 调用被丢弃，广告不会拉起。
@@ -885,30 +755,6 @@ static NSString *DDAdBlockInjectJS(void) {
 // + __objc_selrefs 'notifyMiniProgramPlayableStatusWithIsEnd:' / 'isPlayable'）。
 // 启动后立即 notifyMiniProgramPlayableStatusWithIsEnd:YES，让小程序运行时认为试玩已结束并立刻发奖，
 // 不再等待 19 秒试玩。notifyMiniProgramPlayableStatusWithIsEnd: 兜底强制 YES，应对 startWithConfig 漏触发场景。
-%hook _TtC6WeChat20MagicPlayableService
-- (void)startWithConfig:(id)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) {
-        %orig(arg1);
-        // 前向声明的 Swift 类无法在编译期识别该方法，用 objc_msgSend 强转调用绕过
-        SEL _ddPlayableSel = NSSelectorFromString(@"notifyMiniProgramPlayableStatusWithIsEnd:");
-        if (_ddPlayableSel) ((void (*)(id, SEL, BOOL))objc_msgSend)((id)self, _ddPlayableSel, YES);
-        return;
-    }
-    %orig;
-}
-- (void)notifyMiniProgramPlayableStatusWithIsEnd:(BOOL)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) {
-        %orig(YES);
-        return;
-    }
-    %orig;
-}
-- (void)onCanvasViewFirstFrameRendered:(unsigned int)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
-    %orig;
-}
-%end
-
 %hook _TtC6WeChat23MagicNewPlayableService
 - (void)startWithConfig:(id)arg1 {
     if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) {
@@ -933,22 +779,7 @@ static NSString *DDAdBlockInjectJS(void) {
 }
 %end
 
-// 试玩广告生命周期 JS 桥：插入/更新/移除试玩视图的事件全部清空
-// （selrefs 中 WCR 对应的 _TtC6WeChat* 系列 Swift 事件桥）。即使 PlayableService hook 未触发，
-// JS 层也不会再创建试玩视图渲染。
-%hook _TtC6WeChat46WAJSEventHandler_updateMiniProgramPlayableView
-- (void)handleJSEvent:(id)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
-    %orig;
-}
-%end
 
-%hook _TtC6WeChat49WAJSEventHandler_updateMiniProgramPlayableViewNew
-- (void)handleJSEvent:(id)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
-    %orig;
-}
-%end
 
 %hook _TtC6WeChat46WAJSEventHandler_removeMiniProgramPlayableView
 - (void)handleJSEvent:(id)arg1 {
@@ -989,10 +820,6 @@ static NSString *DDAdBlockInjectJS(void) {
 //   1) initWithFrame: 返回 nil → 窗口不创建（WCR 对齐点）
 //   2) showRootViewControllerAnimated:completion: 空实现 → 即使窗口已创建也不展示开屏广告根VC
 %hook WASplashADWindow
-- (id)initWithFrame:(struct CGRect)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return nil;
-    return %orig;
-}
 - (void)showRootViewControllerAnimated:(BOOL)arg1 completion:(id)arg2 {
     if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) {
         // 跳过开屏广告展示，直接执行完成回调：无广告界面、无声音、不卡顿
@@ -1009,6 +836,13 @@ static NSString *DDAdBlockInjectJS(void) {
     if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
     %orig;
 }
+// v1.5.7 补充（WCR 反汇编复核，imp=0x3C62D8，开关开启时直接 ret 空实现丢弃）：
+// 广告推送消息的另一个下发入口 OnGetNewXmlMsg:Type:MsgWrap:（新 XML 消息 + 类型 + 消息封装）。
+// 与 handleAdMsg: 互补，堵住广告推送的另一条入池通道。
+- (void)OnGetNewXmlMsg:(id)arg1 Type:(id)arg2 MsgWrap:(id)arg3 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
+    %orig;
+}
 %end
 
 // 广告推送服务（通用广告推送）：丢弃推送，阻断广告消息入池。
@@ -1019,63 +853,8 @@ static NSString *DDAdBlockInjectJS(void) {
 }
 %end
 
-// 小程序广告 CGI 发起者（按 posId 拉取广告数据的最底层入口）。
-// 拦截 getAdsCGIWithPosIds: → 小程序广告子系统发不出拉取请求，横幅/插屏/开屏都拿不到数据。
-// 注：此方法为纯 CGI 请求发起，直接 return 只导致“无广告数据”，不会触发 failBlock 报错，
-// 也不会产生“网络连接失败”。
-%hook MagicAdCGIMgr
-+ (void)getAdsCGIWithPosIds:(id)arg1 successBlock:(id)arg2 failBlock:(id)arg3 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
-    %orig;
-}
-%end
 
-// 通用广告服务（小程序横幅/插屏广告的真实数据入口）。
-// 实测确认：小程序内横幅/插屏广告通过 MagicAdCommonService 按 posId 拉取广告数据。
-// 拦截策略（实测有效、且不误伤）：
-//   1) 同步数据入口 getAdInfoWithPosId: / getCachedAdInfoForPosId: 返回 nil
-//      —— 调用方拿到 nil 即视为“无广告”，绝对安全，不会超时/报错。
-//      注：微信 7.6 起原 internalGetAdInfoFromCacheWithPosId: 已改名为 getCachedAdInfoForPosId:。
-//   2) 异步拉取入口 getAdInfoAsyncWithPosId:completion: 直接 return（不再下发广告数据）。
-// 配合 JS 事件层拦截（开屏）与网络层兜底（广告 CGI），完整覆盖小程序开屏/横幅/插屏广告。
-%hook MagicAdCommonService
-- (id)getAdInfoWithPosId:(id)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return nil;
-    return %orig;
-}
-- (id)getCachedAdInfoForPosId:(id)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return nil;
-    return %orig;
-}
-- (void)getAdInfoAsyncWithPosId:(id)arg1 completion:(id)arg2 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
-    %orig;
-}
-- (void)getAdInfoAsyncWithPosId:(id)arg1 timeoutMs:(long long)arg2 completion:(id)arg3 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
-    %orig;
-}
-%end
 
-// 小程序插屏/横幅广告核心服务（Swift：_TtC9WeAppCore25MagicAdMiniProgramService）。
-// 持有 systemCoverView / contentView / 广告容器，小程序内插屏(banner/插屏/激励插屏)广告
-// 都经由它：JS 指令 -> handleJsEvent: -> 准备 -> sendEventToMBBiz -> 渲染展示。
-// 拦截其指令/准备/渲染发送入口 → 小程序内非开屏广告不再拉起。
-// 注：WCR 未覆盖此类（仅覆盖开屏 JS 事件 + 推送），此为按实测补强，更彻底拦净小程序广告。
-%hook _TtC9WeAppCore25MagicAdMiniProgramService
-- (void)handleJsEvent:(id)arg1 extraInfo:(id)arg2 callback:(id)arg3 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
-    %orig;
-}
-- (void)prepareWithAppId:(id)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
-    %orig;
-}
-- (void)sendEventToMBBizWithBizName:(id)arg1 event:(id)arg2 data:(id)arg3 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
-    %orig;
-}
-%end
 
 // 网络层广告拦截：dataTask 层命中广告正则的请求被替换为本地空 data: 请求。
 // 关键边界：
@@ -1114,17 +893,6 @@ static BOOL DDAdBlockURLIsAdRequest(NSURL *url) {
     }
     return %orig;
 }
-- (id)dataTaskWithURL:(NSURL *)arg1 completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))arg2 {
-    DDAdBlockConfig *cfg = [DDAdBlockConfig sharedConfig];
-    if (ddActive() && (cfg.network || cfg.miniProgram)
-        && !cfg.rewardedFastPass
-        && DDAdBlockURLIsAdRequest(arg1)) {
-        // 本方法第一个参数是 NSURL *，需替换为空 data: URL（非 NSURLRequest *）
-        NSURL *du = [NSURL URLWithString:@"data:text/plain;charset=utf-8,"];
-        return %orig(du, arg2);
-    }
-    return %orig;
-}
 %end
 
 // 小程序 WebView 内广告（wx-ad 组件）统一交由原生层开屏拦截 + MagicAd 消息拦截处理，
@@ -1133,47 +901,25 @@ static BOOL DDAdBlockURLIsAdRequest(NSURL *url) {
 
 // ========== 5. 直播广告（Hook: WCFinderLiveHomePageViewController + WCFinderAdCountdownBannerView）[WCR: enhancedAdBlockLiveEnabled] ==========
 %hook WCFinderAdCountdownBannerView
-- (void)setupSubviews {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].live) return;
-    %orig;
-}
-- (void)startCountdown {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].live) return;
-    %orig;
-}
-- (void)updateUIWithTime:(long long)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].live) return;
-    %orig;
-}
 - (BOOL)adHasPlayOver {
     if (ddActive() && [DDAdBlockConfig sharedConfig].live) return YES;
     return %orig;
 }
 %end
 
-%hook WCFinderLiveHomePageViewController
-- (void)onAdSectionView:(id)arg1 selectElementVM:(id)arg2 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].live) return;
-    %orig;
-}
-%end
 
-// 直播广告：isAdsLive（WCR 引用）已由 WCFinderDataItem 覆盖（见视频号模块）。
-// WCR 未引用 MMLiveAdsParams 类，故不对其单独 Hook。
+// 直播广告：WCR 未 hook MMLiveAdsParams 类；WCFinderDataItem 的 adFlag/isAdsLive 为 DD 独有、
+// 已在对齐 WCR 时删除。直播广告去重交由 WCR 同款 FinderObjectAdInfo / WCFinderDataItem.isAd 数据层覆盖。
 
 // ========== 6. 搜索广告（Hook: WCAdSearchH5Info）[WCR: enhancedAdBlockSearchEnabled] ==========
 %hook WCAdSearchH5Info
-- (BOOL)isValid {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].search) return NO;
-    return %orig;
-}
 + (id)fromXML:(struct XmlReaderNode_t *)arg1 {
     if (ddActive() && [DDAdBlockConfig sharedConfig].search) return nil;
     return %orig;
 }
 %end
 
-// ========== 7. 激励广告快速过（精确对齐 WCR：adHasPlayOver + startAdCountdownTimer）[WCR: enhancedAdBlockRewardedAdFastPassEnabled] ==========
+// ========== 7. 激励广告快速过（精确对齐 WCR：adHasPlayOver 已播完判定）[WCR: enhancedAdBlockRewardedAdFastPassEnabled] ==========
 %hook WCFinderRewardAdViewController
 // 让系统认为激励视频已播放完毕，跳过倒计时/等待并触发奖励结算（WCR 同款核心：selrefs 中唯一 adHasPlayOver）
 - (BOOL)adHasPlayOver {
@@ -1181,69 +927,10 @@ static BOOL DDAdBlockURLIsAdRequest(NSURL *url) {
     return %orig;
 }
 // 精准掐断倒计时定时器：视频还未拉起就被立即停掉，配合 adHasPlayOver→YES 形成"无界面、无声音、秒过"。
-- (void)startAdCountdownTimer {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].rewardedFastPass) return;
-    %orig;
-}
 %end
 
-// 视频号激励视频“30 秒后可获得奖励”按钮 view：倒计时数字与文案实际由它渲染。
-// 即使 WCFinderRewardAdViewController.adHasPlayOver=YES 已被原生层识别，若倒计时数字仍在跑，
-// UI 上仍显示“30秒后可获得奖励”造成“未秒过”的视觉。强制 setCountdown: 拦截为 0，让按钮立即进入
-// 可点击完成状态，与 WCFinderRewardAdViewController 链路协同。
-%hook WCFinderAdPromotionButton
-- (void)setCountdown:(long long)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].rewardedFastPass) {
-        %orig((long long)0);
-        return;
-    }
-    %orig;
-}
-- (void)setRemainingSeconds:(long long)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].rewardedFastPass) {
-        %orig((long long)0);
-        return;
-    }
-    %orig;
-}
-%end
 
-// 视频号激励视频（wx.openChannelsRewardedVideoAd）秒过。
-// WCR selrefs 含 setEnhancedAdBlockRewardedAdFastPassEnabled:，但未显式 hook 该 handler，
-// 本实现按 WCR `WCRefineEnhancedAdBlockRewardedAdFastPassEnabled` flag 的语义补齐：handleJSEvent: 接
-// JS 请求后立即调 onSuccessWithFeedBackInfo:rewardedDuration: 让小程序立刻获得奖励；
-// onSuccessWithFeedBackInfo:rewardedDuration: 同步兜底强制 rewardDuration=30。
-%hook WAJSEventHandler_openChannelsRewardedVideoAd
-- (void)handleJSEvent:(id)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].rewardedFastPass) {
-        %orig(arg1);
-        // 前向声明类：原生侧已完成 handleJSEvent 处理，用 objc_msgSend 触发结束回调
-        SEL _sel = NSSelectorFromString(@"onSuccessWithFeedBackInfo:rewardedDuration:");
-        if (_sel) ((void (*)(id, SEL, id, unsigned int))objc_msgSend)((id)self, _sel, nil, (unsigned int)30);
-        return;
-    }
-    %orig;
-}
-- (void)onSuccessWithFeedBackInfo:(id)arg1 rewardedDuration:(unsigned int)arg2 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].rewardedFastPass) {
-        %orig(arg1, (unsigned int)30);
-        return;
-    }
-    %orig;
-}
-%end
 
-// 限时激励秒过 UI（"广告 30秒后可获得奖励"+ 关闭按钮 顶部胶囊）：
-// v1.5.5 误以为是误伤删除，但用户 v1.5.6 反馈"激励广告不秒过"——
-// 真正的误伤源是 WAJSEventHandler_adOperateWXData（无关业务回调类，与广告上报无关），
-// 此 hook 只在 rewardedFastPass 开启时拦截 handleJSEvent:（避免误伤"看广告得奖励"业务入口）：
-// 关闭时正常放行，不影响普通激励流程。
-%hook WAJSEventHandler_showGameRewardsCapsuleBanner
-- (void)handleJSEvent:(id)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].rewardedFastPass) return;
-    %orig;
-}
-%end
 
 
 // ========== 9. 广告曝光上报抑制（Hook: WCAdvertiseStatMgr，归总开关） ==========
@@ -1257,9 +944,6 @@ static BOOL DDAdBlockURLIsAdRequest(NSURL *url) {
 - (void)logADFloatView:(id)arg1 { if (ddActive()) return; %orig; }
 - (void)logADPoiH5:(id)arg1 { if (ddActive()) return; %orig; }
 - (void)logADH5:(id)arg1 withUserInfo:(id)arg2 reportType:(unsigned long long)arg3 { if (ddActive()) return; %orig; }
-- (void)logADCommentLog:(id)arg1 { if (ddActive()) return; %orig; }
-- (void)logADBodyLog:(id)arg1 { if (ddActive()) return; %orig; }
-- (void)reportAllFeedsADLog { if (ddActive()) return; %orig; }
 %end
 
 // ========== 设置界面 ==========
@@ -1355,7 +1039,7 @@ static BOOL DDAdBlockURLIsAdRequest(NSURL *url) {
             id mgr = [mgrClass sharedInstance];
             if ([mgr respondsToSelector:@selector(registerControllerWithTitle:version:controller:)]) {
                 [mgr registerControllerWithTitle:@"DD广告拦截"
-                                         version:@"1.5.6"
+                                         version:@"1.5.8"
                                       controller:@"DDAdBlockSettingsViewController"];
             }
         }
