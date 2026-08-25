@@ -39,6 +39,12 @@
 + (id)switchCellForSel:(SEL)sel target:(id)target title:(id)title on:(BOOL)on;
 @end
 
+// 用于插件注册
+@interface WCPluginsMgr : NSObject
++ (instancetype)sharedInstance;
+- (void)registerControllerWithTitle:(NSString *)title version:(NSString *)version controller:(NSString *)controllerName;
+@end
+
 // ============================================================================
 //  配置类 (开关: master / moments / brand / finder / live / search /
 //         miniProgram / rewardedFastPass)
@@ -794,11 +800,11 @@ static NSString * const DDAdBlockMiniAppHideCSS =
 %end
 
 // ============================================================================
-//  9. 设置界面 (优化版，无兼容处理)
+//  9. 设置界面 (优化版，使用具体类型使编译器识别属性)
 // ============================================================================
 
 @interface DDAdBlockSettingsViewController : UIViewController
-@property (nonatomic, strong) id tableViewManager;
+@property (nonatomic, strong) WCTableViewManager *tableViewManager;
 @end
 
 @implementation DDAdBlockSettingsViewController
@@ -816,7 +822,7 @@ static NSString * const DDAdBlockMiniAppHideCSS =
     self.title = @"DD广告拦截";
     self.view.backgroundColor = [UIColor systemBackgroundColor];
 
-    // 直接创建管理器
+    // 创建管理器
     Class mgrCls = NSClassFromString(@"WCTableViewManager");
     _tableViewManager = [[mgrCls alloc] initWithFrame:self.view.bounds
                                                 style:UITableViewStyleInsetGrouped];
@@ -838,7 +844,7 @@ static NSString * const DDAdBlockMiniAppHideCSS =
     [_tableViewManager clearAllSection];
 
     // ---- 主 Section ----
-    id secMain = [sectionCls defaultSection];
+    WCTableViewSectionManager *secMain = [sectionCls defaultSection];
     secMain.headerTitle = @"广告屏蔽开关";
     [secMain addCell:[self switchCellWithTitle:@"启用广告拦截"
                                             on:cfg.master
@@ -864,7 +870,7 @@ static NSString * const DDAdBlockMiniAppHideCSS =
     [_tableViewManager addSection:secMain];
 
     // ---- 进阶拦截 Section ----
-    id secAdv = [sectionCls defaultSection];
+    WCTableViewSectionManager *secAdv = [sectionCls defaultSection];
     secAdv.headerTitle = @"进阶拦截";
     secAdv.footerTitle = @"开启后，激励广告将自动快速跳过（无需等待）";
     [secAdv addCell:[self switchCellWithTitle:@"激励广告快速跳过"
@@ -876,7 +882,7 @@ static NSString * const DDAdBlockMiniAppHideCSS =
 }
 
 // 辅助方法：创建开关 Cell
-- (id)switchCellWithTitle:(NSString *)title on:(BOOL)on action:(SEL)action {
+- (WCTableViewCellManager *)switchCellWithTitle:(NSString *)title on:(BOOL)on action:(SEL)action {
     Class cellCls = NSClassFromString(@"WCTableViewCellManager");
     return [cellCls switchCellForSel:action
                               target:self
