@@ -1,13 +1,14 @@
 //
 //  DDAdBlock.xm
-//  插件名: DD广告拦截   版本: 1.1.2
+//  插件名: DD广告拦截   版本: 1.1.6
 //
 //  —— 对齐 D.txt 已验证有效的全部拦截层 ——
 //  · 朋友圈 / 公众号 / 视频号 / 直播 / 小程序 / 搜索  (开关分组见底部设置页)
 //  · 小程序 <ad>/<ad-custom> DOM 注入 + URL 黑名单
 //  · 公众号文章 WebView URL 黑名单 + document-start 注入 JS
 //  · 视频号评论区广告 (WCFinderCommentAdTableViewCell, Flex 实证)
-//  · 视频号视频流广告 (WCFinderFeedContentVM 第一层, 头文件实证)
+//  · 视频号视频流广告 (WCFinderDataItem 第一层: isHardAdFeed / isHardAdLiveFeed / isFromAdsStream / adFlag, 头文件实证)
+//       —— 实证来源: WCFinderDataItem.h / WCFinderComment.h / WCAdFinderInfo.h (你提供的 class-dump)
 //
 //  —— 开关：显式 setter + synchronize (默认全关, 关闭立即持久化, 不使用宏) ——
 //  —— 合规：仅供个人逆向学习, 请勿分发 ——
@@ -18,6 +19,12 @@
 #import <WebKit/WebKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
+
+// 说明: 不 #import 微信私有头文件, 也不写 @class 前向声明.
+// Logos 的 %hook ClassName 是运行时按类名查找, 编译期无需类定义;
+// 前提是每个 %hook 方法体内只用 %orig 与 UIKit/Foundation 等系统 API,
+// 不主动调用 [self 微信私有方法] —— 否则需在该类 %hook 内改用 IMP 派发.
+// 视频号相关类的拦截方法 (isHardAdFeed 等) 均已按此约定编写.
 
 // ============================================================================
 //  插件管理入口
@@ -293,17 +300,15 @@ static NSString *DDAdBlockMPInjectJS(void) {
 //  3. 视频号广告
 // ============================================================================
 
-// ----- 3.1 数据对象层 (D.txt 兼容) -----
+// ----- 3.1 数据对象层 (D.txt 兼容, 真实头文件确认字段) -----
+// WCFinderComment.h 实锤: advertisementInfo / commentAdImageUrl / promotionInfo 均存在
 %hook WCFinderComment
 - (id)advertisementInfo  { if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return nil; return %orig; }
 - (id)commentAdImageUrl  { if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return nil; return %orig; }
 - (id)promotionInfo      { if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return nil; return %orig; }
 %end
 
-%hook WCFinderDataItem
-- (unsigned long long)adFlag { if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return 0; return %orig; }
-%end
-
+// WCAdFinderInfo: 广告标识对象, isValid 直接判 NO
 %hook WCAdFinderInfo
 - (BOOL)isValid { if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return NO; return %orig; }
 %end
@@ -312,12 +317,7 @@ static NSString *DDAdBlockMPInjectJS(void) {
 %hook WCFinderCommentAdTableViewCell
 - (void)updateWithModel:(id)arg1 width:(double)arg2 {
     if (ddActive() && [DDAdBlockConfig sharedConfig].finder) {
-        %orig;
-        id cell = (id)self;
-        if ([cell respondsToSelector:@selector(resetCellData)]) {
-            void (*imp)(id, SEL) = (void (*)(id, SEL))[cell methodForSelector:@selector(resetCellData)];
-            if (imp) imp(cell, @selector(resetCellData));
-        }
+        // 不调用 %orig, 广告 Cell 不渲染内容; 直接隐藏, 高度由下方方法返回 0
         ddViewSetHidden((UIView *)self, YES);
         return;
     }
@@ -367,41 +367,70 @@ static NSString *DDAdBlockMPInjectJS(void) {
 %end
 
 // ----- 3.3 视频流广告 (刷到的广告视频) -----
-// 证据: WCFinderFeedContentVM (class-dump 真实头文件)
-//   shouldShowAdCorner / isHardAdLiveFeed / isExptNotShowAd / isAdCardOpen / isAdRequestOpen
-// 思路: 仅第一层 —— 让微信自己认为"没有广告", 列表/角标/素材请求全部失效
-%hook WCFinderFeedContentVM
-- (BOOL)shouldShowAdCorner {
+// 证据: WCFinderDataItem (class-dump 真实头文件, 你贴的 WCFinderDataItem.h)
+//   官方判定方法:
+//     - isHardAdFeed       ← ★ 视频流硬广 Feed (刷到的广告视频就是这个)
+//     - isHardAdLiveFeed   ← 直播硬广
+//     - isFromAdsStream / setIsFromAdsStream:  ← 是否来自广告流
+//     - adFlag (property)   ← 广告标记位
+// 思路: 第一层 —— 让微信自己认为"该 item 不是广告",
+//       列表插入 / 角标 / 素材请求 / 曝光上报全部失效, 无需碰 Cell / 播放器.
+%hook WCFinderDataItem
+// ★ 视频流广告 (刷到的广告视频)
+- (BOOL)isHardAdFeed {
     if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return NO;
     return %orig;
 }
-- (BOOL)shouldHiddenAdCorner {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return YES;
-    return %orig;
-}
+// 直播硬广
 - (BOOL)isHardAdLiveFeed {
     if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return NO;
     return %orig;
 }
-- (BOOL)isExptNotShowAd {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return YES;
-    return %orig;
-}
-- (BOOL)isAdCardOpen {
+// 是否来自广告流 (带 setter, 一并 neutralize)
+- (BOOL)isFromAdsStream {
     if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return NO;
     return %orig;
 }
-- (BOOL)isAdRequestOpen {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return NO;
-    return %orig;
-}
-- (BOOL)shouldShowSplashAD {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return NO;
-    return %orig;
-}
-- (void)setEnableAd:(BOOL)arg1 {
+- (void)setIsFromAdsStream:(BOOL)arg1 {
     if (ddActive() && [DDAdBlockConfig sharedConfig].finder) { %orig(NO); return; }
     %orig;
+}
+// 兜底: 广告标记位清零
+- (unsigned long long)adFlag {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return 0;
+    return %orig;
+}
+// 广告跳转信息容器置空 (点击广告区/跳转信息一并失效)
+- (id)jumpInfoContainer {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return nil;
+    return %orig;
+}
+- (id)postJumpInfoContainer {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return nil;
+    return %orig;
+}
+// 直播广告封面 URL 置空
+- (id)adLiveCoverUrl {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return nil;
+    return %orig;
+}
+// 直播广告参数置空
+- (id)adsParams {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return nil;
+    return %orig;
+}
+@end
+
+// 辅助判定: 任意 WCFinderDataItem 是否为广告 (运行时探测, 用于列表层兜底)
+static BOOL ddIsFinderDataItemAd(id item) {
+    if (!item || ![item isKindOfClass:%c(WCFinderDataItem)]) return NO;
+    // 优先官方判定方法 (来自真实头文件, 编译期即可校验)
+    if ([item respondsToSelector:@selector(isHardAdFeed)] && [item isHardAdFeed]) return YES;
+    if ([item respondsToSelector:@selector(isHardAdLiveFeed)] && [item isHardAdLiveFeed]) return YES;
+    if ([item respondsToSelector:@selector(isFromAdsStream)] && [item isFromAdsStream]) return YES;
+    // 兜底: adFlag 数值判定
+    if ([item respondsToSelector:@selector(adFlag)] && [item adFlag] != 0) return YES;
+    return NO;
 }
 %end
 
@@ -639,7 +668,7 @@ static NSString *DDAdBlockMiniAppInjectJS(void) {
             id mgr = [mgrClass sharedInstance];
             if ([mgr respondsToSelector:@selector(registerControllerWithTitle:version:controller:)]) {
                 [mgr registerControllerWithTitle:@"DD广告拦截"
-                                         version:@"1.1.2"
+                                         version:@"1.1.3"
                                       controller:@"DDAdBlockSettingsViewController"];
             }
         }
