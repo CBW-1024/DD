@@ -17,6 +17,29 @@
 #import <objc/runtime.h>
 
 // ============================================================================
+//  为设置界面声明的微信私有类方法（仅声明，不实现），使编译器通过
+// ============================================================================
+
+@interface WCTableViewManager : NSObject
+- (UITableView *)getTableView;
+- (void)clearAllSection;
+- (void)addSection:(id)section;
+- (void)reloadTableView;
+- (instancetype)initWithFrame:(CGRect)frame style:(UITableViewStyle)style;
+@end
+
+@interface WCTableViewSectionManager : NSObject
++ (instancetype)defaultSection;
+- (void)addCell:(id)cell;
+@property (nonatomic, copy) NSString *headerTitle;
+@property (nonatomic, copy) NSString *footerTitle;
+@end
+
+@interface WCTableViewCellManager : NSObject
++ (id)switchCellForSel:(SEL)sel target:(id)target title:(id)title on:(BOOL)on;
+@end
+
+// ============================================================================
 //  配置类 (开关: master / moments / brand / finder / live / search /
 //         miniProgram / rewardedFastPass)
 // ============================================================================
@@ -771,7 +794,7 @@ static NSString * const DDAdBlockMiniAppHideCSS =
 %end
 
 // ============================================================================
-//  9. 设置界面 (优化版)
+//  9. 设置界面 (优化版，无兼容处理)
 // ============================================================================
 
 @interface DDAdBlockSettingsViewController : UIViewController
@@ -783,7 +806,7 @@ static NSString * const DDAdBlockMiniAppHideCSS =
 - (instancetype)init {
     self = [super init];
     if (self) {
-        // 延迟初始化 tableViewManager，避免在 init 时依赖 view 尺寸
+        // 延迟初始化
     }
     return self;
 }
@@ -793,37 +816,22 @@ static NSString * const DDAdBlockMiniAppHideCSS =
     self.title = @"DD广告拦截";
     self.view.backgroundColor = [UIColor systemBackgroundColor];
 
-    [self setupTableViewManager];
-    [self buildSections];
-}
-
-- (void)setupTableViewManager {
-    if (_tableViewManager) return;
+    // 直接创建管理器
     Class mgrCls = NSClassFromString(@"WCTableViewManager");
-    if (!mgrCls) {
-        // 若类不存在，给个占位提示
-        UILabel *label = [[UILabel alloc] initWithFrame:self.view.bounds];
-        label.text = @"无法加载设置界面（依赖类不存在）";
-        label.textAlignment = NSTextAlignmentCenter;
-        label.textColor = [UIColor secondaryLabelColor];
-        [self.view addSubview:label];
-        return;
-    }
     _tableViewManager = [[mgrCls alloc] initWithFrame:self.view.bounds
                                                 style:UITableViewStyleInsetGrouped];
-    UITableView *tableView = [self.tableViewManager getTableView];
+    UITableView *tableView = [_tableViewManager getTableView];
     tableView.frame = self.view.bounds;
     tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     tableView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentAutomatic;
     [self.view addSubview:tableView];
+
+    [self buildSections];
 }
 
 - (void)buildSections {
-    if (!_tableViewManager) return;
     Class sectionCls = NSClassFromString(@"WCTableViewSectionManager");
     Class cellCls = NSClassFromString(@"WCTableViewCellManager");
-    if (!sectionCls || !cellCls) return;
-
     DDAdBlockConfig *cfg = [DDAdBlockConfig sharedConfig];
 
     // 清空旧数据
@@ -870,7 +878,6 @@ static NSString * const DDAdBlockMiniAppHideCSS =
 // 辅助方法：创建开关 Cell
 - (id)switchCellWithTitle:(NSString *)title on:(BOOL)on action:(SEL)action {
     Class cellCls = NSClassFromString(@"WCTableViewCellManager");
-    if (!cellCls) return nil;
     return [cellCls switchCellForSel:action
                               target:self
                                title:title
