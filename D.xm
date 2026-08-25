@@ -1,12 +1,11 @@
 //
 //  DDAdBlock.xm
-//  DD广告拦截 v1.0.0（最终版，仅更新公众号/小程序 WebView 拦截）
+//  DD广告拦截 v1.0.0（性能优化版）
 //
-//  特点：
-//  - 每个广告模块完全自包含（开关判断 + 辅助函数）
-//  - 配置单例全局共享
-//  - 不依赖私有头文件，仅运行时查找类
-//  - 公众号/小程序采用去广告.xm 的最新 WebView 拦截方案（URL黑名单 + 注入JS + DOM sweep）
+//  优化点：
+//  - 公众号：仅 WKUserScript 注入一次，移除 webViewDidFinishLoad 重复执行
+//  - 小程序：JS 防重复检查，清理旧 observer/timer
+//  - 所有注入 JS 带有防重复和清理逻辑，减少 CPU/内存消耗
 //
 
 #import <UIKit/UIKit.h>
@@ -223,7 +222,7 @@ static inline BOOL momentsEnabled(void) {
 %end
 
 // ============================================================================
-//  2. 公众号广告模块（新方案：注入 WKUserScript + URL 拦截 + DOM 清理）
+//  2. 公众号广告模块（优化版：仅 WKUserScript 注入，无重复执行）
 // ============================================================================
 
 static inline BOOL brandEnabled(void) {
@@ -244,24 +243,31 @@ static NSString *DDAdBlockMPHideParentCSS(void) {
            @"{display:none!important;height:0!important;}";
 }
 
-// 注入 JS（包含 CSS + 周期性 DOM 扫描 + MutationObserver）
+// 注入 JS（包含 CSS + 周期性 DOM 扫描 + MutationObserver，带防重复和清理）
 static NSString *DDAdBlockInjectJS(void) {
     return [NSString stringWithFormat:
-        @"(function(){try{"
-        @"if(!document.getElementById('__dd_adblock')){"
+        @"(function(){"
+        @"if(window.__dd_injected)return;"
+        @"window.__dd_injected=true;"
+        @"if(window.__dd_ob){window.__dd_ob.disconnect();delete window.__dd_ob;}"
+        @"if(window.__dd_timer){clearTimeout(window.__dd_timer);delete window.__dd_timer;}"
+        @"try{"
         @"var s=document.createElement('style');s.id='__dd_adblock';"
         @"s.textContent='%@'+'%@';"
-        @"(document.head||document.documentElement).appendChild(s);}"
+        @"(document.head||document.documentElement).appendChild(s);"
         @"var sweep=function(){try{Array.prototype.forEach.call("
         @"document.querySelectorAll('.iframe_ad_container,.comment-ad-container'),"
         @"function(e){var p=e.parentElement,n=0;"
         @"while(p&&n<3){if(p.tagName==='LI'||(p.className&&/comment-ad|discuss_media/.test(p.className))){"
         @"p.style.setProperty('display','none','important');break;}p=p.parentElement;n++;}});}catch(e){}};"
         @"sweep();"
-        @"if(!window.__dd_ob&&window.MutationObserver){"
-        @"var t=null;window.__dd_ob=new MutationObserver(function(){"
-        @"if(t)return;t=setTimeout(function(){t=null;sweep();},300);});"
-        @"window.__dd_ob.observe(document.documentElement,{childList:true,subtree:true});}"
+        @"if(window.MutationObserver){"
+        @"var timer=null;"
+        @"window.__dd_ob=new MutationObserver(function(){"
+        @"if(timer)return;timer=setTimeout(function(){timer=null;sweep();},300);});"
+        @"window.__dd_ob.observe(document.documentElement,{childList:true,subtree:true});"
+        @"window.__dd_timer=timer;"
+        @"}"
         @"}catch(e){}})();",
         DDAdBlockMPHideCSS(), DDAdBlockMPHideParentCSS()];
 }
@@ -340,7 +346,7 @@ static BOOL ddURLIsAd(NSString *url) {
 }
 %end
 
-// MMWebViewController WebView 拦截
+// MMWebViewController WebView 拦截（仅 WKUserScript 注入，无 webViewDidFinishLoad 重复）
 %hook MMWebViewController
 - (id)webViewUserScriptsForConfiguration {
     id scripts = %orig;
@@ -367,17 +373,7 @@ static BOOL ddURLIsAd(NSString *url) {
     }
     return %orig;
 }
-
-- (void)webViewDidFinishLoad:(id)arg1 navigation:(id)arg2 {
-    %orig;
-    if (!brandEnabled()) return;
-    WKWebView *wv = nil;
-    @try {
-        wv = [(id)self valueForKey:@"webView"];
-    } @catch (__unused NSException *e) {}
-    if (![wv isKindOfClass:[WKWebView class]]) return;
-    [wv evaluateJavaScript:DDAdBlockInjectJS() completionHandler:nil];
-}
+// 注意：不再 hook webViewDidFinishLoad，避免重复注入
 %end
 
 // ============================================================================
@@ -587,14 +583,14 @@ static inline BOOL searchEnabled(void) {
 %end
 
 // ============================================================================
-//  6. 小程序广告模块（新方案：原生层拦截 + WebView URL 黑名单 + DOM 隐藏）
+//  6. 小程序广告模块（优化版：带防重复和清理）
 // ============================================================================
 
 static inline BOOL miniProgramEnabled(void) {
     return [DDAdBlockConfig sharedConfig].master && [DDAdBlockConfig sharedConfig].miniProgram;
 }
 
-// 小程序专用 CSS（隐藏 <wx-ad> 等原生组件）
+// 小程序专用 CSS
 static NSString *DDAdBlockMiniAppHideCSS(void) {
     return @"wx-ad,wx-ad-custom,ad,ad-custom,.wx-ad,.wx-ad-custom"
            @"{display:none!important;height:0!important;min-height:0!important;"
@@ -602,24 +598,31 @@ static NSString *DDAdBlockMiniAppHideCSS(void) {
            @"overflow:hidden!important;}";
 }
 
-// 小程序注入 JS（含 CSS + DOM 扫描 + MutationObserver）
+// 注入 JS（带防重复和清理）
 static NSString *DDAdBlockMiniAppInjectJS(void) {
     return [NSString stringWithFormat:
-        @"(function(){try{"
-        @"if(!document.getElementById('__dd_adblock_wa')){"
+        @"(function(){"
+        @"if(window.__dd_injected_wa)return;"
+        @"window.__dd_injected_wa=true;"
+        @"if(window.__dd_ob_wa){window.__dd_ob_wa.disconnect();delete window.__dd_ob_wa;}"
+        @"if(window.__dd_timer_wa){clearTimeout(window.__dd_timer_wa);delete window.__dd_timer_wa;}"
+        @"try{"
         @"var s=document.createElement('style');s.id='__dd_adblock_wa';"
         @"s.textContent='%@';"
-        @"(document.head||document.documentElement).appendChild(s);}"
+        @"(document.head||document.documentElement).appendChild(s);"
         @"var sweep=function(){try{Array.prototype.forEach.call("
         @"document.querySelectorAll('wx-ad,wx-ad-custom,.wx-ad,.wx-ad-custom'),"
         @"function(e){e.style.setProperty('display','none','important');"
         @"e.style.setProperty('height','0','important');"
         @"e.style.setProperty('max-height','0','important');});}catch(e){}};"
         @"sweep();"
-        @"if(!window.__dd_ob_wa&&window.MutationObserver){"
-        @"var t=null;window.__dd_ob_wa=new MutationObserver(function(){"
-        @"if(t)return;t=setTimeout(function(){t=null;sweep();},300);});"
-        @"window.__dd_ob_wa.observe(document.documentElement,{childList:true,subtree:true});}"
+        @"if(window.MutationObserver){"
+        @"var timer=null;"
+        @"window.__dd_ob_wa=new MutationObserver(function(){"
+        @"if(timer)return;timer=setTimeout(function(){timer=null;sweep();},300);});"
+        @"window.__dd_ob_wa.observe(document.documentElement,{childList:true,subtree:true});"
+        @"window.__dd_timer_wa=timer;"
+        @"}"
         @"}catch(e){}})();",
         DDAdBlockMiniAppHideCSS()];
 }
@@ -701,7 +704,7 @@ static NSString *DDAdBlockMiniAppInjectJS(void) {
 }
 %end
 
-// WAWebViewController WebView 拦截
+// WAWebViewController WebView 拦截（仅 webViewDidFinishLoad，带防重复）
 %hook WAWebViewController
 - (void)webViewDidFinishLoad:(id)arg1 navigation:(id)arg2 {
     %orig;
