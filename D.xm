@@ -228,6 +228,48 @@ static void ddViewSetHidden(id view, BOOL hidden) {
 //     ↓ WebView 相关辅助代码就近放在本模块内部
 // ============================================================================
 
+// ----- 2a. 原生数据层 -----
+%hook BrandTLExptConfig
+- (BOOL)isExptNotShowAd {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return YES;
+    return %orig;
+}
+%end
+
+%hook BrandTLCanvasCardMgr
+- (BOOL)isAdCardOpen {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return NO;
+    return %orig;
+}
+- (BOOL)isAdRequestOpen {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return NO;
+    return %orig;
+}
+- (void)handleBizAdNotifyNewXml:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return;
+    %orig;
+}
+%end
+
+%hook BrandAdDataParser
++ (id)adDataItemForContent:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return nil;
+    return %orig;
+}
++ (id)adDataItemForMsgWrap:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return nil;
+    return %orig;
+}
++ (id)adInfoDicForContent:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return nil;
+    return %orig;
+}
++ (id)adInfoDicForMsgWrap:(id)arg1 {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return nil;
+    return %orig;
+}
+%end
+
 // ----- 2b/2c 辅助: 广告 URL 黑名单 (公众号专属) -----
 static NSString * const DDAdBlockMPURLBlocklist[] = {
     @"wxs.qq.com/tmpl/px",
@@ -285,48 +327,6 @@ static NSString * const DDAdBlockMPHideCSS =
 @"padding:0!important;overflow:hidden!important;}"
 @"div:has(> .iframe_ad_container),"
 @"li:has(> .comment-ad-container){display:none!important;height:0!important;}";
-
-// ----- 2a. 原生数据层 -----
-%hook BrandTLExptConfig
-- (BOOL)isExptNotShowAd {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return YES;
-    return %orig;
-}
-%end
-
-%hook BrandTLCanvasCardMgr
-- (BOOL)isAdCardOpen {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return NO;
-    return %orig;
-}
-- (BOOL)isAdRequestOpen {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return NO;
-    return %orig;
-}
-- (void)handleBizAdNotifyNewXml:(id)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return;
-    %orig;
-}
-%end
-
-%hook BrandAdDataParser
-+ (id)adDataItemForContent:(id)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return nil;
-    return %orig;
-}
-+ (id)adDataItemForMsgWrap:(id)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return nil;
-    return %orig;
-}
-+ (id)adInfoDicForContent:(id)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return nil;
-    return %orig;
-}
-+ (id)adInfoDicForMsgWrap:(id)arg1 {
-    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return nil;
-    return %orig;
-}
-%end
 
 // ----- 2b. WebView URL 黑名单: 在请求阶段直接拦截广告 URL -----
 %hook MMWebViewController
@@ -552,61 +552,6 @@ static NSString * const DDAdBlockMPHideCSS =
 //     ↓ WebView 相关辅助代码就近放在本模块内部 (与公众号模块各自独立)
 // ============================================================================
 
-// ----- 6b/6c 辅助: 广告 URL 黑名单 (小程序专属) -----
-static NSString * const DDAdBlockMiniAppURLBlocklist[] = {
-    @"wxs.qq.com/tmpl/px",
-    @"wxs.qq.com/tmpl/lite",
-    @"wxs.qq.com/tmpl",
-    @"mmbiz-bin/ad",
-    @"ad.weixin.qq.com",
-    @"cgi-bin/mmbiz-bin/ad",
-    @"getappmsgad",
-    @"magicad",
-    @"magic-ad",
-    @"posId=",
-    nil
-};
-
-// 判定 URL 是否为广告 (小程序 WebView 使用)
-static BOOL ddMiniAppURLIsAd(NSURL *url) {
-    if (!url) return NO;
-    NSString *absolute = url.absoluteString;
-    if (!absolute) return NO;
-    for (NSInteger i = 0; DDAdBlockMiniAppURLBlocklist[i] != nil; i++) {
-        if ([absolute rangeOfString:DDAdBlockMiniAppURLBlocklist[i] options:NSCaseInsensitiveSearch].location != NSNotFound) {
-            return YES;
-        }
-    }
-    return NO;
-}
-
-// document-start 注入的通用 JS: 注入 CSS + 周期性 DOM sweep (小程序使用)
-static NSString * const DDAdBlockMiniAppInjectJS =
-@"(function(){"
-@"var s=document.createElement('style');"
-@"s.textContent='[class*=ad],[id*=ad],[class*=Ad],"
-@"[class*=advert],iframe[src*=ad],.ad-container,.ad_box,"
-@".ad-card,.ad_banner,.ad_feed,.ad-mask,.ad-cover,.ad-slot{"
-@"display:none!important;width:0!important;height:0!important;"
-@"overflow:hidden!important;opacity:0!important;}';"
-@"document.head.appendChild(s);"
-@"function sweep(){"
-@"var all=document.querySelectorAll("
-@"'[class*=ad],[id*=ad],[class*=Ad],[class*=advert]');"
-@"for(var i=0;i<all.length;i++){"
-@"var r=all[i].getBoundingClientRect();"
-@"if(r.width>0&&r.height>0){all[i].style.cssText+='display:none!important;';}}"
-@"}"
-@"setInterval(sweep,1500);sweep();"
-@"})();";
-
-// 小程序专用隐藏 CSS (<wx-ad> / <wx-ad-custom> 原生组件)
-static NSString * const DDAdBlockMiniAppHideCSS =
-@"wx-ad,wx-ad-custom,ad,ad-custom,"
-@".wx-ad,.wx-ad-custom{display:none!important;height:0!important;"
-@"min-height:0!important;max-height:0!important;margin:0!important;"
-@"padding:0!important;overflow:hidden!important;}";
-
 // ----- 6a. 原生数据层 / CGI / 推送 -----
 %hook WAAppTaskSplashADConfig
 - (void)handleShowSplashAdCalled:(BOOL)arg1 {
@@ -683,6 +628,61 @@ static NSString * const DDAdBlockMiniAppHideCSS =
     %orig;
 }
 %end
+
+// ----- 6b/6c 辅助: 广告 URL 黑名单 (小程序专属) -----
+static NSString * const DDAdBlockMiniAppURLBlocklist[] = {
+    @"wxs.qq.com/tmpl/px",
+    @"wxs.qq.com/tmpl/lite",
+    @"wxs.qq.com/tmpl",
+    @"mmbiz-bin/ad",
+    @"ad.weixin.qq.com",
+    @"cgi-bin/mmbiz-bin/ad",
+    @"getappmsgad",
+    @"magicad",
+    @"magic-ad",
+    @"posId=",
+    nil
+};
+
+// 判定 URL 是否为广告 (小程序 WebView 使用)
+static BOOL ddMiniAppURLIsAd(NSURL *url) {
+    if (!url) return NO;
+    NSString *absolute = url.absoluteString;
+    if (!absolute) return NO;
+    for (NSInteger i = 0; DDAdBlockMiniAppURLBlocklist[i] != nil; i++) {
+        if ([absolute rangeOfString:DDAdBlockMiniAppURLBlocklist[i] options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+// document-start 注入的通用 JS: 注入 CSS + 周期性 DOM sweep (小程序使用)
+static NSString * const DDAdBlockMiniAppInjectJS =
+@"(function(){"
+@"var s=document.createElement('style');"
+@"s.textContent='[class*=ad],[id*=ad],[class*=Ad],"
+@"[class*=advert],iframe[src*=ad],.ad-container,.ad_box,"
+@".ad-card,.ad_banner,.ad_feed,.ad-mask,.ad-cover,.ad-slot{"
+@"display:none!important;width:0!important;height:0!important;"
+@"overflow:hidden!important;opacity:0!important;}';"
+@"document.head.appendChild(s);"
+@"function sweep(){"
+@"var all=document.querySelectorAll("
+@"'[class*=ad],[id*=ad],[class*=Ad],[class*=advert]');"
+@"for(var i=0;i<all.length;i++){"
+@"var r=all[i].getBoundingClientRect();"
+@"if(r.width>0&&r.height>0){all[i].style.cssText+='display:none!important;';}}"
+@"}"
+@"setInterval(sweep,1500);sweep();"
+@"})();";
+
+// 小程序专用隐藏 CSS (<wx-ad> / <wx-ad-custom> 原生组件)
+static NSString * const DDAdBlockMiniAppHideCSS =
+@"wx-ad,wx-ad-custom,ad,ad-custom,"
+@".wx-ad,.wx-ad-custom{display:none!important;height:0!important;"
+@"min-height:0!important;max-height:0!important;margin:0!important;"
+@"padding:0!important;overflow:hidden!important;}";
 
 // ----- 6b. WebView URL 黑名单: 在请求阶段直接拦截广告 URL -----
 %hook WAWebViewController
