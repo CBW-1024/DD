@@ -419,9 +419,10 @@ static NSString *DDAdBlockMPInjectJS(void) {
     if (ddActive() && [DDAdBlockConfig sharedConfig].finder) return nil;
     return %orig;
 }
-@end
+%end  // 闭合 %hook WCFinderDataItem
 
 // 辅助判定: 任意 WCFinderDataItem 是否为广告 (运行时探测, 用于列表层兜底)
+// 注意: 此函数必须位于 %hook 块外部 (Logos 不允许在 %hook 内定义 C 函数)
 static BOOL ddIsFinderDataItemAd(id item) {
     if (!item || ![item isKindOfClass:%c(WCFinderDataItem)]) return NO;
     // 优先官方判定方法 (来自真实头文件, 编译期即可校验)
@@ -432,7 +433,6 @@ static BOOL ddIsFinderDataItemAd(id item) {
     if ([item respondsToSelector:@selector(adFlag)] && [item adFlag] != 0) return YES;
     return NO;
 }
-%end
 
 // ============================================================================
 //  4. 直播广告
