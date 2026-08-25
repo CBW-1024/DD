@@ -7,8 +7,8 @@
 //  - 不写 @class 前向声明, 也不 #import 微信私有头文件
 //    (Logos 的 %hook 运行时按类名查找, 方法体内只用 %orig 与系统 API)
 //  - 开关默认全关, 关闭立即 synchronize 持久化 (不会自动回弹)
-//  - 视频流广告: 仅用 WCFinderDataItem 第一层 neutralize (基于真实头文件)
-//  - 编译期需把 WeChatHeaders/8.0.76 加入 Header Search Paths
+//  - 组织方式: 按开关顺序分模块, 每个模块的辅助代码就近放在本模块内部
+//    (如 WebView 黑名单/注入 JS/CSS 分别内聚在公众号模块和小程序模块里)
 //
 
 #import <UIKit/UIKit.h>
@@ -17,17 +17,18 @@
 #import <objc/runtime.h>
 
 // ============================================================================
-//  配置类
+//  配置类 (开关: master / moments / brand / finder / live / search /
+//         miniProgram / rewardedFastPass)
 // ============================================================================
 
-static NSString * const kDDAdBlockMasterKey           = @"DDAdBlock_Master";
-static NSString * const kDDAdBlockMomentsKey          = @"DDAdBlock_Moments";
-static NSString * const kDDAdBlockBrandKey            = @"DDAdBlock_Brand";
-static NSString * const kDDAdBlockFinderKey           = @"DDAdBlock_Finder";
-static NSString * const kDDAdBlockLiveKey             = @"DDAdBlock_Live";
-static NSString * const kDDAdBlockMiniProgramKey      = @"DDAdBlock_MiniProgram";
-static NSString * const kDDAdBlockSearchKey           = @"DDAdBlock_Search";
-static NSString * const kDDAdBlockRewardedFastPassKey = @"DDAdBlock_RewardedFastPass";
+static NSString * const kMaster           = @"DDAdBlock_Master";
+static NSString * const kMoments          = @"DDAdBlock_Moments";
+static NSString * const kBrand            = @"DDAdBlock_Brand";
+static NSString * const kFinder           = @"DDAdBlock_Finder";
+static NSString * const kLive             = @"DDAdBlock_Live";
+static NSString * const kMiniProgram      = @"DDAdBlock_MiniProgram";
+static NSString * const kSearch           = @"DDAdBlock_Search";
+static NSString * const kRewardedFastPass = @"DDAdBlock_RewardedFastPass";
 
 @interface DDAdBlockConfig : NSObject
 + (instancetype)sharedConfig;
@@ -65,24 +66,24 @@ static NSString * const kDDAdBlockRewardedFastPassKey = @"DDAdBlock_RewardedFast
     self = [super init];
     if (self) {
         NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-        if ([ud objectForKey:kDDAdBlockMasterKey] == nil)           [ud setBool:NO forKey:kDDAdBlockMasterKey];
-        if ([ud objectForKey:kDDAdBlockMomentsKey] == nil)          [ud setBool:NO forKey:kDDAdBlockMomentsKey];
-        if ([ud objectForKey:kDDAdBlockBrandKey] == nil)            [ud setBool:NO forKey:kDDAdBlockBrandKey];
-        if ([ud objectForKey:kDDAdBlockFinderKey] == nil)           [ud setBool:NO forKey:kDDAdBlockFinderKey];
-        if ([ud objectForKey:kDDAdBlockLiveKey] == nil)             [ud setBool:NO forKey:kDDAdBlockLiveKey];
-        if ([ud objectForKey:kDDAdBlockMiniProgramKey] == nil)      [ud setBool:NO forKey:kDDAdBlockMiniProgramKey];
-        if ([ud objectForKey:kDDAdBlockSearchKey] == nil)           [ud setBool:NO forKey:kDDAdBlockSearchKey];
-        if ([ud objectForKey:kDDAdBlockRewardedFastPassKey] == nil) [ud setBool:NO forKey:kDDAdBlockRewardedFastPassKey];
+        if ([ud objectForKey:kMaster] == nil)           [ud setBool:NO forKey:kMaster];
+        if ([ud objectForKey:kMoments] == nil)          [ud setBool:NO forKey:kMoments];
+        if ([ud objectForKey:kBrand] == nil)            [ud setBool:NO forKey:kBrand];
+        if ([ud objectForKey:kFinder] == nil)           [ud setBool:NO forKey:kFinder];
+        if ([ud objectForKey:kLive] == nil)             [ud setBool:NO forKey:kLive];
+        if ([ud objectForKey:kMiniProgram] == nil)      [ud setBool:NO forKey:kMiniProgram];
+        if ([ud objectForKey:kSearch] == nil)           [ud setBool:NO forKey:kSearch];
+        if ([ud objectForKey:kRewardedFastPass] == nil) [ud setBool:NO forKey:kRewardedFastPass];
         [ud synchronize];
 
-        _master           = [ud boolForKey:kDDAdBlockMasterKey];
-        _moments          = [ud boolForKey:kDDAdBlockMomentsKey];
-        _brand            = [ud boolForKey:kDDAdBlockBrandKey];
-        _finder           = [ud boolForKey:kDDAdBlockFinderKey];
-        _live             = [ud boolForKey:kDDAdBlockLiveKey];
-        _miniProgram      = [ud boolForKey:kDDAdBlockMiniProgramKey];
-        _search           = [ud boolForKey:kDDAdBlockSearchKey];
-        _rewardedFastPass = [ud boolForKey:kDDAdBlockRewardedFastPassKey];
+        _master           = [ud boolForKey:kMaster];
+        _moments          = [ud boolForKey:kMoments];
+        _brand            = [ud boolForKey:kBrand];
+        _finder           = [ud boolForKey:kFinder];
+        _live             = [ud boolForKey:kLive];
+        _miniProgram      = [ud boolForKey:kMiniProgram];
+        _search           = [ud boolForKey:kSearch];
+        _rewardedFastPass = [ud boolForKey:kRewardedFastPass];
     }
     return self;
 }
@@ -90,60 +91,64 @@ static NSString * const kDDAdBlockRewardedFastPassKey = @"DDAdBlock_RewardedFast
 - (void)setMaster:(BOOL)value {
     _master = value;
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    [ud setBool:value forKey:kDDAdBlockMasterKey];
+    [ud setBool:value forKey:kMaster];
     [ud synchronize];
 }
 
 - (void)setMoments:(BOOL)value {
     _moments = value;
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    [ud setBool:value forKey:kDDAdBlockMomentsKey];
+    [ud setBool:value forKey:kMoments];
     [ud synchronize];
 }
 
 - (void)setBrand:(BOOL)value {
     _brand = value;
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    [ud setBool:value forKey:kDDAdBlockBrandKey];
+    [ud setBool:value forKey:kBrand];
     [ud synchronize];
 }
 
 - (void)setFinder:(BOOL)value {
     _finder = value;
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    [ud setBool:value forKey:kDDAdBlockFinderKey];
+    [ud setBool:value forKey:kFinder];
     [ud synchronize];
 }
 
 - (void)setLive:(BOOL)value {
     _live = value;
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    [ud setBool:value forKey:kDDAdBlockLiveKey];
+    [ud setBool:value forKey:kLive];
     [ud synchronize];
 }
 
 - (void)setMiniProgram:(BOOL)value {
     _miniProgram = value;
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    [ud setBool:value forKey:kDDAdBlockMiniProgramKey];
+    [ud setBool:value forKey:kMiniProgram];
     [ud synchronize];
 }
 
 - (void)setSearch:(BOOL)value {
     _search = value;
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    [ud setBool:value forKey:kDDAdBlockSearchKey];
+    [ud setBool:value forKey:kSearch];
     [ud synchronize];
 }
 
 - (void)setRewardedFastPass:(BOOL)value {
     _rewardedFastPass = value;
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    [ud setBool:value forKey:kDDAdBlockRewardedFastPassKey];
+    [ud setBool:value forKey:kRewardedFastPass];
     [ud synchronize];
 }
 
 @end
+
+// ============================================================================
+//  全局守卫 (被所有模块共用, 放此处作为基础设施)
+// ============================================================================
 
 static BOOL ddActive(void) {
     return [DDAdBlockConfig sharedConfig].master;
@@ -153,10 +158,7 @@ static BOOL ddFinderOn(void) {
     return ddActive() && [DDAdBlockConfig sharedConfig].finder;
 }
 
-// ============================================================================
-//  工具函数
-// ============================================================================
-
+// 安全的 setHidden: (规避前向声明, 供视频号 Cell 使用)
 static void ddViewSetHidden(id view, BOOL hidden) {
     if (!view) return;
     SEL sel = @selector(setHidden:);
@@ -166,66 +168,8 @@ static void ddViewSetHidden(id view, BOOL hidden) {
     }
 }
 
-static NSString * const DDAdBlockURLBlocklist[] = {
-    @"wxs.qq.com/tmpl/px",
-    @"wxs.qq.com/tmpl/lite",
-    @"wxs.qq.com/tmpl",
-    @"mmbiz-bin/ad",
-    @"ad.weixin.qq.com",
-    @"cgi-bin/mmbiz-bin/ad",
-    @"getappmsgad",
-    nil
-};
-
-static BOOL ddURLIsAd(NSURL *url) {
-    if (!url) return NO;
-    NSString *absolute = url.absoluteString;
-    if (!absolute) return NO;
-    for (NSInteger i = 0; DDAdBlockURLBlocklist[i] != nil; i++) {
-        if ([absolute rangeOfString:DDAdBlockURLBlocklist[i] options:NSCaseInsensitiveSearch].location != NSNotFound) {
-            return YES;
-        }
-    }
-    return NO;
-}
-
-static NSString * const DDAdBlockInjectJS =
-@"(function(){"
-@"var s=document.createElement('style');"
-@"s.textContent='[class*=ad],[id*=ad],[class*=Ad],"
-@"[class*=advert],iframe[src*=ad],.ad-container,.ad_box,"
-@".ad-card,.ad_banner,.ad_feed,.ad-mask,.ad-cover,.ad-slot{"
-@"display:none!important;width:0!important;height:0!important;"
-@"overflow:hidden!important;opacity:0!important;}"
-@"video[class*=ad],div[class*=ad] video{display:none!important;}';"
-@"document.head.appendChild(s);"
-@"function sweep(){"
-@"var all=document.querySelectorAll("
-@"'[class*=ad],[id*=ad],[class*=Ad],[class*=advert]');"
-@"for(var i=0;i<all.length;i++){"
-@"var r=all[i].getBoundingClientRect();"
-@"if(r.width>0&&r.height>0){all[i].style.cssText+='display:none!important;';}}"
-@"}"
-@"setInterval(sweep,1500);sweep();"
-@"})();";
-
-static NSString * const DDAdBlockMPHideCSS =
-@".iframe_ad_container,.iframe_adv_ad_container,.comment-ad-container,"
-@"li.cidad_comment_constant_key,#cidad_comment_constant_key,"
-@".adv_keyword_search,.ad_control-tips{display:none!important;"
-@"height:0!important;min-height:0!important;margin:0!important;"
-@"padding:0!important;overflow:hidden!important;}"
-@"div:has(> .iframe_ad_container),"
-@"li:has(> .comment-ad-container){display:none!important;height:0!important;}";
-
-static NSString * const DDAdBlockMiniAppHideCSS =
-@"wx-ad,wx-ad-custom,ad,ad-custom,"
-@".wx-ad,.wx-ad-custom{display:none!important;height:0!important;"
-@"min-height:0!important;max-height:0!important;margin:0!important;"
-@"padding:0!important;overflow:hidden!important;}";
-
 // ============================================================================
-//  1. 朋友圈广告
+//  1. 朋友圈广告 (moments)
 // ============================================================================
 
 %hook WCAdvertiseDataHelper
@@ -279,9 +223,70 @@ static NSString * const DDAdBlockMiniAppHideCSS =
 %end
 
 // ============================================================================
-//  2. 公众号广告
+//  2. 公众号广告 (brand)
+//     (a) 原生数据层  (b) WebView URL 黑名单 + JS 注入 + DOM sweep
+//     ↓ WebView 相关辅助代码就近放在本模块内部
 // ============================================================================
 
+// ----- 2b/2c 辅助: 广告 URL 黑名单 (公众号专属) -----
+static NSString * const DDAdBlockMPURLBlocklist[] = {
+    @"wxs.qq.com/tmpl/px",
+    @"wxs.qq.com/tmpl/lite",
+    @"wxs.qq.com/tmpl",
+    @"mmbiz-bin/ad",
+    @"ad.weixin.qq.com",
+    @"cgi-bin/mmbiz-bin/ad",
+    @"getappmsgad",
+    @"magicad",
+    @"magic-ad",
+    @"posId=",
+    nil
+};
+
+// 判定 URL 是否为广告 (公众号 WebView 使用)
+static BOOL ddMPURLIsAd(NSURL *url) {
+    if (!url) return NO;
+    NSString *absolute = url.absoluteString;
+    if (!absolute) return NO;
+    for (NSInteger i = 0; DDAdBlockMPURLBlocklist[i] != nil; i++) {
+        if ([absolute rangeOfString:DDAdBlockMPURLBlocklist[i] options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+// document-start 注入的通用 JS: 注入 CSS + 周期性 DOM sweep (公众号使用)
+static NSString * const DDAdBlockMPInjectJS =
+@"(function(){"
+@"var s=document.createElement('style');"
+@"s.textContent='[class*=ad],[id*=ad],[class*=Ad],"
+@"[class*=advert],iframe[src*=ad],.ad-container,.ad_box,"
+@".ad-card,.ad_banner,.ad_feed,.ad-mask,.ad-cover,.ad-slot{"
+@"display:none!important;width:0!important;height:0!important;"
+@"overflow:hidden!important;opacity:0!important;}';"
+@"document.head.appendChild(s);"
+@"function sweep(){"
+@"var all=document.querySelectorAll("
+@"'[class*=ad],[id*=ad],[class*=Ad],[class*=advert]');"
+@"for(var i=0;i<all.length;i++){"
+@"var r=all[i].getBoundingClientRect();"
+@"if(r.width>0&&r.height>0){all[i].style.cssText+='display:none!important;';}}"
+@"}"
+@"setInterval(sweep,1500);sweep();"
+@"})();";
+
+// 公众号文章页专用隐藏 CSS (iframe 广告 / 评论区广告 / 关键词广告)
+static NSString * const DDAdBlockMPHideCSS =
+@".iframe_ad_container,.iframe_adv_ad_container,.comment-ad-container,"
+@"li.cidad_comment_constant_key,#cidad_comment_constant_key,"
+@"adv_keyword_search,.ad_control-tips{display:none!important;"
+@"height:0!important;min-height:0!important;margin:0!important;"
+@"padding:0!important;overflow:hidden!important;}"
+@"div:has(> .iframe_ad_container),"
+@"li:has(> .comment-ad-container){display:none!important;height:0!important;}";
+
+// ----- 2a. 原生数据层 -----
 %hook BrandTLExptConfig
 - (BOOL)isExptNotShowAd {
     if (ddActive() && [DDAdBlockConfig sharedConfig].brand) return YES;
@@ -323,27 +328,41 @@ static NSString * const DDAdBlockMiniAppHideCSS =
 }
 %end
 
+// ----- 2b. WebView URL 黑名单: 在请求阶段直接拦截广告 URL -----
 %hook MMWebViewController
-- (void)webViewDidFinishLoad:(id)arg1 navigation:(id)arg2 {
+- (void)webView:(id)webView decidePolicyForNavigationAction:(id)action
+        decisionHandler:(void (^)(NSInteger))decisionHandler {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].brand) {
+        NSURL *url = nil;
+        @try { url = [(id)action valueForKey:@"URL"]; } @catch (__unused NSException *e) {}
+        if (url && ddMPURLIsAd(url)) {
+            if (decisionHandler) decisionHandler(2); // WKNavigationActionPolicyCancel
+            return;
+        }
+    }
+    %orig;
+}
+%end
+
+// ----- 2c. 加载完成注入 JS + 补充公众号专用 CSS -----
+%hook MMWebViewController
+- (void)webView:(id)webView didFinishNavigation:(id)navigation {
     %orig;
     if (!(ddActive() && [DDAdBlockConfig sharedConfig].brand)) return;
     WKWebView *wv = nil;
-    @try {
-        wv = [(id)self valueForKey:@"webView"];
-    } @catch (__unused NSException *e) {
-        wv = nil;
-    }
+    @try { wv = [(id)self valueForKey:@"webView"]; } @catch (__unused NSException *e) {}
     if (![wv isKindOfClass:[WKWebView class]]) return;
+    [wv evaluateJavaScript:DDAdBlockMPInjectJS completionHandler:nil];
     [wv evaluateJavaScript:DDAdBlockMPHideCSS completionHandler:nil];
 }
 %end
 
 // ============================================================================
-//  3. 视频号
+//  3. 视频号广告 (finder)
+//     3.1 评论区广告  3.2 视频流广告 (刷到的广告视频, 仅第一层)
 // ============================================================================
 
 // ----- 3.1 评论区广告 -----
-
 %hook WCFinderComment
 - (id)advertisementInfo {
     if (ddFinderOn()) return nil;
@@ -440,11 +459,10 @@ static NSString * const DDAdBlockMiniAppHideCSS =
 %end
 
 // ----- 3.2 视频流广告 (刷到的广告视频, 仅第一层) -----
-// 依据 WCFinderDataItem / WCFinderFeedContentVM 真实头文件:
-// 广告判定接口为 isHardAdFeed / isHardAdLiveFeed / isFromAdsStream / adFlag 等.
+// 依据 WCFinderDataItem 真实头文件: 广告判定接口为
+// isHardAdFeed / isHardAdLiveFeed / isFromAdsStream / adFlag 等.
 // 让微信自身认为 "该 item 不是广告", 列表插入/角标/素材请求/上报全部失效,
 // 不碰 Cell, 不碰播放器.
-
 %hook WCFinderDataItem
 - (BOOL)isHardAdFeed {
     if (ddFinderOn()) return NO;
@@ -465,10 +483,6 @@ static NSString * const DDAdBlockMiniAppHideCSS =
     }
     %orig;
 }
-- (unsigned long long)adFlag {
-    if (ddFinderOn()) return 0;
-    return %orig;
-}
 - (id)jumpInfoContainer {
     if (ddFinderOn()) return nil;
     return %orig;
@@ -488,7 +502,7 @@ static NSString * const DDAdBlockMiniAppHideCSS =
 %end
 
 // ============================================================================
-//  4. 直播广告
+//  4. 直播广告 (live)
 // ============================================================================
 
 %hook WCFinderAdCountdownBannerView
@@ -518,7 +532,7 @@ static NSString * const DDAdBlockMiniAppHideCSS =
 %end
 
 // ============================================================================
-//  5. 搜索广告
+//  5. 搜索广告 (search)
 // ============================================================================
 
 %hook WCAdSearchH5Info
@@ -533,9 +547,67 @@ static NSString * const DDAdBlockMiniAppHideCSS =
 %end
 
 // ============================================================================
-//  6. 小程序广告
+//  6. 小程序广告 (miniProgram)
+//     (a) 原生数据层 / CGI / 推送  (b) WebView URL 黑名单 + JS 注入 + DOM sweep
+//     ↓ WebView 相关辅助代码就近放在本模块内部 (与公众号模块各自独立)
 // ============================================================================
 
+// ----- 6b/6c 辅助: 广告 URL 黑名单 (小程序专属) -----
+static NSString * const DDAdBlockMiniAppURLBlocklist[] = {
+    @"wxs.qq.com/tmpl/px",
+    @"wxs.qq.com/tmpl/lite",
+    @"wxs.qq.com/tmpl",
+    @"mmbiz-bin/ad",
+    @"ad.weixin.qq.com",
+    @"cgi-bin/mmbiz-bin/ad",
+    @"getappmsgad",
+    @"magicad",
+    @"magic-ad",
+    @"posId=",
+    nil
+};
+
+// 判定 URL 是否为广告 (小程序 WebView 使用)
+static BOOL ddMiniAppURLIsAd(NSURL *url) {
+    if (!url) return NO;
+    NSString *absolute = url.absoluteString;
+    if (!absolute) return NO;
+    for (NSInteger i = 0; DDAdBlockMiniAppURLBlocklist[i] != nil; i++) {
+        if ([absolute rangeOfString:DDAdBlockMiniAppURLBlocklist[i] options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+// document-start 注入的通用 JS: 注入 CSS + 周期性 DOM sweep (小程序使用)
+static NSString * const DDAdBlockMiniAppInjectJS =
+@"(function(){"
+@"var s=document.createElement('style');"
+@"s.textContent='[class*=ad],[id*=ad],[class*=Ad],"
+@"[class*=advert],iframe[src*=ad],.ad-container,.ad_box,"
+@".ad-card,.ad_banner,.ad_feed,.ad-mask,.ad-cover,.ad-slot{"
+@"display:none!important;width:0!important;height:0!important;"
+@"overflow:hidden!important;opacity:0!important;}';"
+@"document.head.appendChild(s);"
+@"function sweep(){"
+@"var all=document.querySelectorAll("
+@"'[class*=ad],[id*=ad],[class*=Ad],[class*=advert]');"
+@"for(var i=0;i<all.length;i++){"
+@"var r=all[i].getBoundingClientRect();"
+@"if(r.width>0&&r.height>0){all[i].style.cssText+='display:none!important;';}}"
+@"}"
+@"setInterval(sweep,1500);sweep();"
+@"})();";
+
+// 小程序专用隐藏 CSS (<wx-ad> / <wx-ad-custom> 原生组件)
+static NSString * const DDAdBlockMiniAppHideCSS =
+@"wx-ad,wx-ad-custom,ad,ad-custom,"
+@".wx-ad,.wx-ad-custom{display:none!important;height:0!important;"
+@"min-height:0!important;max-height:0!important;margin:0!important;"
+@"padding:0!important;overflow:hidden!important;}";
+
+// ----- 6a. 原生数据层 / CGI / 推送 -----
 %hook WAAppTaskSplashADConfig
 - (void)handleShowSplashAdCalled:(BOOL)arg1 {
     if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) return;
@@ -612,23 +684,37 @@ static NSString * const DDAdBlockMiniAppHideCSS =
 }
 %end
 
+// ----- 6b. WebView URL 黑名单: 在请求阶段直接拦截广告 URL -----
 %hook WAWebViewController
-- (void)webViewDidFinishLoad:(id)arg1 navigation:(id)arg2 {
+- (void)webView:(id)webView decidePolicyForNavigationAction:(id)action
+        decisionHandler:(void (^)(NSInteger))decisionHandler {
+    if (ddActive() && [DDAdBlockConfig sharedConfig].miniProgram) {
+        NSURL *url = nil;
+        @try { url = [(id)action valueForKey:@"URL"]; } @catch (__unused NSException *e) {}
+        if (url && ddMiniAppURLIsAd(url)) {
+            if (decisionHandler) decisionHandler(2); // WKNavigationActionPolicyCancel
+            return;
+        }
+    }
+    %orig;
+}
+%end
+
+// ----- 6c. 加载完成注入 JS + 补充 <wx-ad> 原生组件 CSS -----
+%hook WAWebViewController
+- (void)webView:(id)webView didFinishNavigation:(id)navigation {
     %orig;
     if (!(ddActive() && [DDAdBlockConfig sharedConfig].miniProgram)) return;
     id wv = nil;
-    @try {
-        wv = [(id)self valueForKey:@"webView"];
-    } @catch (__unused NSException *e) {
-        wv = nil;
-    }
+    @try { wv = [(id)self valueForKey:@"webView"]; } @catch (__unused NSException *e) {}
     if (![wv respondsToSelector:@selector(evaluateJavaScript:completionHandler:)]) return;
+    [wv evaluateJavaScript:DDAdBlockMiniAppInjectJS completionHandler:nil];
     [wv evaluateJavaScript:DDAdBlockMiniAppHideCSS completionHandler:nil];
 }
 %end
 
 // ============================================================================
-//  7. 激励广告快速跳过 (进阶拦截唯一项)
+//  7. 激励广告快速跳过 (rewardedFastPass, 进阶拦截唯一项)
 // ============================================================================
 
 %hook WCFinderRewardAdViewController
@@ -642,7 +728,7 @@ static NSString * const DDAdBlockMiniAppHideCSS =
 %end
 
 // ============================================================================
-//  8. 广告上报抑制
+//  8. 广告上报抑制 (全局, 独立于分区开关)
 // ============================================================================
 
 %hook WCAdvertiseStatMgr
@@ -739,14 +825,14 @@ static NSString * const DDAdBlockMiniAppHideCSS =
     [tableViewManager reloadTableView];
 }
 
-- (void)onMasterSwitch:(UISwitch *)s        { [DDAdBlockConfig sharedConfig].master = s.isOn; [self buildTable]; }
-- (void)onMomentsSwitch:(UISwitch *)s       { [DDAdBlockConfig sharedConfig].moments = s.isOn; }
-- (void)onBrandSwitch:(UISwitch *)s         { [DDAdBlockConfig sharedConfig].brand = s.isOn; }
-- (void)onFinderSwitch:(UISwitch *)s        { [DDAdBlockConfig sharedConfig].finder = s.isOn; }
-- (void)onLiveSwitch:(UISwitch *)s          { [DDAdBlockConfig sharedConfig].live = s.isOn; }
-- (void)onSearchSwitch:(UISwitch *)s        { [DDAdBlockConfig sharedConfig].search = s.isOn; }
-- (void)onMiniProgramSwitch:(UISwitch *)s   { [DDAdBlockConfig sharedConfig].miniProgram = s.isOn; }
-- (void)onRewardedSwitch:(UISwitch *)s      { [DDAdBlockConfig sharedConfig].rewardedFastPass = s.isOn; }
+- (void)onMasterSwitch:(UISwitch *)s      { [DDAdBlockConfig sharedConfig].master = s.isOn;           [self buildTable]; }
+- (void)onMomentsSwitch:(UISwitch *)s     { [DDAdBlockConfig sharedConfig].moments = s.isOn; }
+- (void)onBrandSwitch:(UISwitch *)s       { [DDAdBlockConfig sharedConfig].brand = s.isOn; }
+- (void)onFinderSwitch:(UISwitch *)s      { [DDAdBlockConfig sharedConfig].finder = s.isOn; }
+- (void)onLiveSwitch:(UISwitch *)s        { [DDAdBlockConfig sharedConfig].live = s.isOn; }
+- (void)onSearchSwitch:(UISwitch *)s      { [DDAdBlockConfig sharedConfig].search = s.isOn; }
+- (void)onMiniProgramSwitch:(UISwitch *)s { [DDAdBlockConfig sharedConfig].miniProgram = s.isOn; }
+- (void)onRewardedSwitch:(UISwitch *)s    { [DDAdBlockConfig sharedConfig].rewardedFastPass = s.isOn; }
 
 @end
 
