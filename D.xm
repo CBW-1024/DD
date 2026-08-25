@@ -1,17 +1,120 @@
 //
 //  DDAdBlock.xm
-//  DD广告拦截 v1.0.0（性能优化版）
+//  DD广告拦截 v1.0.0（带日志调试版）
 //
-//  优化点：
-//  - 公众号：仅 WKUserScript 注入一次，移除 webViewDidFinishLoad 重复执行
-//  - 小程序：JS 防重复检查，清理旧 observer/timer
-//  - 所有注入 JS 带有防重复和清理逻辑，减少 CPU/内存消耗
+//  新增功能：
+//  - 日志记录所有拦截动作（原生层、WebView URL、DOM 清理、Cell 隐藏）
+//  - 设置界面增加“导出日志”和“清空日志”按钮
+//  - 日志存储在 Documents/DDAdBlock.log，可分享或复制
 //
 
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
 #import <WebKit/WebKit.h>
 #import <objc/runtime.h>
+
+// ============================================================================
+//  日志管理器（线程安全，写入文件）
+// ============================================================================
+
+@interface DDAdBlockLogger : NSObject
++ (instancetype)sharedLogger;
+- (void)log:(NSString *)message;
+- (NSString *)logFilePath;
+- (NSString *)allLogs;
+- (void)clearLogs;
+@end
+
+@implementation DDAdBlockLogger {
+    dispatch_queue_t _logQueue;
+    NSFileHandle *_fileHandle;
+    NSString *_filePath;
+}
+
++ (instancetype)sharedLogger {
+    static DDAdBlockLogger *logger = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        logger = [[DDAdBlockLogger alloc] init];
+    });
+    return logger;
+}
+
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _logQueue = dispatch_queue_create("com.dd.adblock.log", DISPATCH_QUEUE_SERIAL);
+        NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+        NSString *documents = [paths firstObject];
+        _filePath = [documents stringByAppendingPathComponent:@"DDAdBlock.log"];
+        // 如果文件不存在，创建空文件
+        if (![[NSFileManager defaultManager] fileExistsAtPath:_filePath]) {
+            [[NSData data] writeToFile:_filePath atomically:YES];
+        }
+        _fileHandle = [NSFileHandle fileHandleForWritingAtPath:_filePath];
+        if (_fileHandle) {
+            [_fileHandle seekToEndOfFile];
+        } else {
+            // 降级：直接写入
+            [_filePath writeToFile:_filePath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        }
+    }
+    return self;
+}
+
+- (void)log:(NSString *)message {
+    dispatch_async(_logQueue, ^{
+        NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+        formatter.dateFormat = @"yyyy-MM-dd HH:mm:ss.SSS";
+        NSString *timestamp = [formatter stringFromDate:[NSDate date]];
+        NSString *line = [NSString stringWithFormat:@"[%@] %@\n", timestamp, message];
+        NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
+        if (self->_fileHandle) {
+            @try {
+                [self->_fileHandle writeData:data];
+            } @catch (NSException *e) {
+                // 重新打开文件
+                self->_fileHandle = [NSFileHandle fileHandleForWritingAtPath:self->_filePath];
+                [self->_fileHandle seekToEndOfFile];
+                [self->_fileHandle writeData:data];
+            }
+        } else {
+            // 降级写入
+            NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:self->_filePath];
+            [fh seekToEndOfFile];
+            [fh writeData:data];
+            [fh closeFile];
+        }
+    });
+}
+
+- (NSString *)logFilePath {
+    return _filePath;
+}
+
+- (NSString *)allLogs {
+    __block NSString *content = nil;
+    dispatch_sync(_logQueue, ^{
+        content = [NSString stringWithContentsOfFile:self->_filePath encoding:NSUTF8StringEncoding error:nil];
+    });
+    return content ?: @"";
+}
+
+- (void)clearLogs {
+    dispatch_async(_logQueue, ^{
+        [[NSData data] writeToFile:self->_filePath atomically:YES];
+        if (self->_fileHandle) {
+            [self->_fileHandle closeFile];
+            self->_fileHandle = [NSFileHandle fileHandleForWritingAtPath:self->_filePath];
+            [self->_fileHandle seekToEndOfFile];
+        }
+    });
+}
+
+@end
+
+// 便捷宏
+#define DDLog(fmt, ...) [[DDAdBlockLogger sharedLogger] log:[NSString stringWithFormat:fmt, ##__VA_ARGS__]]
 
 // ============================================================================
 //  声明微信私有类（供设置界面及插件注册使用）
@@ -34,6 +137,7 @@
 
 @interface WCTableViewCellManager : NSObject
 + (id)switchCellForSel:(SEL)sel target:(id)target title:(id)title on:(BOOL)on;
++ (id)normalCellForSel:(SEL)sel target:(id)target title:(id)title;
 @end
 
 @interface WCPluginsMgr : NSObject
@@ -164,7 +268,7 @@ static NSString * const kRewardedFastPass = @"DDAdBlock_RewardedFastPass";
 @end
 
 // ============================================================================
-//  1. 朋友圈广告模块
+//  1. 朋友圈广告模块（带日志）
 // ============================================================================
 
 static inline BOOL momentsEnabled(void) {
@@ -173,63 +277,96 @@ static inline BOOL momentsEnabled(void) {
 
 %hook WCAdvertiseDataHelper
 - (void)saveAdPullCompareInfo:(id)arg1 {
-    if (momentsEnabled()) return;
+    if (momentsEnabled()) {
+        DDLog(@"朋友圈广告拦截: saveAdPullCompareInfo 被阻止");
+        return;
+    }
     %orig;
 }
 - (void)saveAdvertiseMsgXmlDatas {
-    if (momentsEnabled()) return;
+    if (momentsEnabled()) {
+        DDLog(@"朋友圈广告拦截: saveAdvertiseMsgXmlDatas 被阻止");
+        return;
+    }
     %orig;
 }
 - (void)addAdvertiseDataList:(id)arg1 {
-    if (momentsEnabled()) return;
+    if (momentsEnabled()) {
+        DDLog(@"朋友圈广告拦截: addAdvertiseDataList 被阻止");
+        return;
+    }
     %orig;
 }
 - (void)saveAdvertiseDatas {
-    if (momentsEnabled()) return;
+    if (momentsEnabled()) {
+        DDLog(@"朋友圈广告拦截: saveAdvertiseDatas 被阻止");
+        return;
+    }
     %orig;
 }
 - (void)tryLoadAdvertiseData {
-    if (momentsEnabled()) return;
+    if (momentsEnabled()) {
+        DDLog(@"朋友圈广告拦截: tryLoadAdvertiseData 被阻止");
+        return;
+    }
     %orig;
 }
 - (BOOL)isAdPreviewExpired:(id)arg1 {
-    if (momentsEnabled()) return YES;
+    if (momentsEnabled()) {
+        DDLog(@"朋友圈广告拦截: isAdPreviewExpired 返回 YES (视为过期)");
+        return YES;
+    }
     return %orig;
 }
 %end
 
 %hook WCTimelineMgr
 - (id)getAdvertiseDataByCurMinTime:(unsigned int)arg1 MaxTime:(unsigned int)arg2 checkDataValid:(BOOL)arg3 {
-    if (momentsEnabled()) return [NSMutableArray array];
+    if (momentsEnabled()) {
+        DDLog(@"朋友圈广告拦截: getAdvertiseData... 返回空数组");
+        return [NSMutableArray array];
+    }
     return %orig;
 }
 - (id)getAdvertiseDataByCurMinTime:(unsigned int)arg1 MaxTime:(unsigned int)arg2 {
-    if (momentsEnabled()) return [NSMutableArray array];
+    if (momentsEnabled()) {
+        DDLog(@"朋友圈广告拦截: getAdvertiseData 返回空数组");
+        return [NSMutableArray array];
+    }
     return %orig;
 }
 - (id)getTopAdvertiseDataByTopNumber:(unsigned int)arg1 {
-    if (momentsEnabled()) return [NSMutableArray array];
+    if (momentsEnabled()) {
+        DDLog(@"朋友圈广告拦截: getTopAdvertiseDataByTopNumber 返回空数组");
+        return [NSMutableArray array];
+    }
     return %orig;
 }
 - (void)onAdPullWithAdDatas:(id)arg1 {
-    if (momentsEnabled()) return;
+    if (momentsEnabled()) {
+        DDLog(@"朋友圈广告拦截: onAdPullWithAdDatas 被阻止");
+        return;
+    }
     %orig;
 }
 - (void)tryToProcessWithNewAdList:(id)arg1 {
-    if (momentsEnabled()) return;
+    if (momentsEnabled()) {
+        DDLog(@"朋友圈广告拦截: tryToProcessWithNewAdList 被阻止");
+        return;
+    }
     %orig;
 }
 %end
 
 // ============================================================================
-//  2. 公众号广告模块（优化版：仅 WKUserScript 注入，无重复执行）
+//  2. 公众号广告模块（带日志）
 // ============================================================================
 
 static inline BOOL brandEnabled(void) {
     return [DDAdBlockConfig sharedConfig].master && [DDAdBlockConfig sharedConfig].brand;
 }
 
-// 公众号专用 CSS（隐藏 iframe/评论区广告等）
+// 公众号 CSS/JS（同前，不加日志，但注入时会记录）
 static NSString *DDAdBlockMPHideCSS(void) {
     return @".iframe_ad_container,.iframe_adv_ad_container,.comment-ad-container,"
            @"li.cidad_comment_constant_key,#cidad_comment_constant_key,"
@@ -243,7 +380,6 @@ static NSString *DDAdBlockMPHideParentCSS(void) {
            @"{display:none!important;height:0!important;}";
 }
 
-// 注入 JS（包含 CSS + 周期性 DOM 扫描 + MutationObserver，带防重复和清理）
 static NSString *DDAdBlockInjectJS(void) {
     return [NSString stringWithFormat:
         @"(function(){"
@@ -272,7 +408,7 @@ static NSString *DDAdBlockInjectJS(void) {
         DDAdBlockMPHideCSS(), DDAdBlockMPHideParentCSS()];
 }
 
-// URL 黑名单（覆盖公众号/小程序广告素材、联盟广告等）
+// URL 黑名单
 static NSArray<NSString *> *DDAdBlockURLBlocklist(void) {
     static NSArray *list;
     static dispatch_once_t once;
@@ -299,58 +435,85 @@ static NSArray<NSString *> *DDAdBlockURLBlocklist(void) {
 static BOOL ddURLIsAd(NSString *url) {
     if (url.length == 0) return NO;
     for (NSString *sub in DDAdBlockURLBlocklist()) {
-        if ([url containsString:sub]) return YES;
+        if ([url containsString:sub]) {
+            DDLog(@"URL黑名单匹配: %@ 包含 %@", url, sub);
+            return YES;
+        }
     }
     return NO;
 }
 
-// 原生数据层拦截（保留原实现）
+// 原生层
 %hook BrandTLExptConfig
 - (BOOL)isExptNotShowAd {
-    if (brandEnabled()) return YES;
+    if (brandEnabled()) {
+        DDLog(@"公众号广告拦截: BrandTLExptConfig isExptNotShowAd 返回 YES");
+        return YES;
+    }
     return %orig;
 }
 %end
 
 %hook BrandTLCanvasCardMgr
 - (BOOL)isAdCardOpen {
-    if (brandEnabled()) return NO;
+    if (brandEnabled()) {
+        DDLog(@"公众号广告拦截: BrandTLCanvasCardMgr isAdCardOpen 返回 NO");
+        return NO;
+    }
     return %orig;
 }
 - (BOOL)isAdRequestOpen {
-    if (brandEnabled()) return NO;
+    if (brandEnabled()) {
+        DDLog(@"公众号广告拦截: BrandTLCanvasCardMgr isAdRequestOpen 返回 NO");
+        return NO;
+    }
     return %orig;
 }
 - (void)handleBizAdNotifyNewXml:(id)arg1 {
-    if (brandEnabled()) return;
+    if (brandEnabled()) {
+        DDLog(@"公众号广告拦截: handleBizAdNotifyNewXml 被阻止");
+        return;
+    }
     %orig;
 }
 %end
 
 %hook BrandAdDataParser
 + (id)adDataItemForContent:(id)arg1 {
-    if (brandEnabled()) return nil;
+    if (brandEnabled()) {
+        DDLog(@"公众号广告拦截: BrandAdDataParser adDataItemForContent 返回 nil");
+        return nil;
+    }
     return %orig;
 }
 + (id)adDataItemForMsgWrap:(id)arg1 {
-    if (brandEnabled()) return nil;
+    if (brandEnabled()) {
+        DDLog(@"公众号广告拦截: BrandAdDataParser adDataItemForMsgWrap 返回 nil");
+        return nil;
+    }
     return %orig;
 }
 + (id)adInfoDicForContent:(id)arg1 {
-    if (brandEnabled()) return nil;
+    if (brandEnabled()) {
+        DDLog(@"公众号广告拦截: BrandAdDataParser adInfoDicForContent 返回 nil");
+        return nil;
+    }
     return %orig;
 }
 + (id)adInfoDicForMsgWrap:(id)arg1 {
-    if (brandEnabled()) return nil;
+    if (brandEnabled()) {
+        DDLog(@"公众号广告拦截: BrandAdDataParser adInfoDicForMsgWrap 返回 nil");
+        return nil;
+    }
     return %orig;
 }
 %end
 
-// MMWebViewController WebView 拦截（仅 WKUserScript 注入，无 webViewDidFinishLoad 重复）
 %hook MMWebViewController
 - (id)webViewUserScriptsForConfiguration {
     id scripts = %orig;
     if (!brandEnabled()) return scripts;
+    DDLog(@"公众号广告: 注入 WKUserScript (DocumentStart)");
     NSMutableArray *arr = [scripts isKindOfClass:[NSArray class]]
         ? [(NSArray *)scripts mutableCopy]
         : [NSMutableArray array];
@@ -365,26 +528,26 @@ static BOOL ddURLIsAd(NSString *url) {
     if (brandEnabled() && !arg4) {
         NSString *u = [[(NSURLRequest *)arg2 URL] absoluteString];
         if ([u containsString:@"wxa.wxs.qq.com"] && [u containsString:@"/tmpl/px/"]) {
+            DDLog(@"公众号广告: 拦截 iframe 广告 URL: %@", u);
             return NO;
         }
         if (ddURLIsAd(u)) {
+            DDLog(@"公众号广告: 拦截广告 URL: %@", u);
             return NO;
         }
     }
     return %orig;
 }
-// 注意：不再 hook webViewDidFinishLoad，避免重复注入
 %end
 
 // ============================================================================
-//  3. 视频号广告模块（含辅助工具 ddViewSetHidden）
+//  3. 视频号广告模块（带日志）
 // ============================================================================
 
 static inline BOOL finderEnabled(void) {
     return [DDAdBlockConfig sharedConfig].master && [DDAdBlockConfig sharedConfig].finder;
 }
 
-// 辅助：安全设置 hidden（仅此模块使用）
 static void ddViewSetHidden(id view, BOOL hidden) {
     if (!view) return;
     SEL sel = @selector(setHidden:);
@@ -394,32 +557,46 @@ static void ddViewSetHidden(id view, BOOL hidden) {
     }
 }
 
-// 评论区广告
 %hook WCFinderComment
 - (id)advertisementInfo {
-    if (finderEnabled()) return nil;
+    if (finderEnabled()) {
+        DDLog(@"视频号广告: WCFinderComment advertisementInfo 返回 nil");
+        return nil;
+    }
     return %orig;
 }
 - (id)commentAdImageUrl {
-    if (finderEnabled()) return nil;
+    if (finderEnabled()) {
+        DDLog(@"视频号广告: WCFinderComment commentAdImageUrl 返回 nil");
+        return nil;
+    }
     return %orig;
 }
 - (id)promotionInfo {
-    if (finderEnabled()) return nil;
+    if (finderEnabled()) {
+        DDLog(@"视频号广告: WCFinderComment promotionInfo 返回 nil");
+        return nil;
+    }
     return %orig;
 }
 %end
 
 %hook WCFinderDataItem
 - (unsigned long long)adFlag {
-    if (finderEnabled()) return 0;
+    if (finderEnabled()) {
+        DDLog(@"视频号广告: WCFinderDataItem adFlag 返回 0");
+        return 0;
+    }
     return %orig;
 }
 %end
 
 %hook WCAdFinderInfo
 - (BOOL)isValid {
-    if (finderEnabled()) return NO;
+    if (finderEnabled()) {
+        DDLog(@"视频号广告: WCAdFinderInfo isValid 返回 NO");
+        return NO;
+    }
     return %orig;
 }
 %end
@@ -427,6 +604,7 @@ static void ddViewSetHidden(id view, BOOL hidden) {
 %hook WCFinderCommentAdTableViewCell
 - (void)updateWithModel:(id)arg1 width:(double)arg2 {
     if (finderEnabled()) {
+        DDLog(@"视频号广告: 隐藏评论区广告 Cell");
         %orig;
         ddViewSetHidden((id)self, YES);
         return;
@@ -434,103 +612,164 @@ static void ddViewSetHidden(id view, BOOL hidden) {
     %orig;
 }
 - (double)sectionHeightWith:(id)arg1 width:(double)arg2 halfScreenHeight:(double)arg3 {
-    if (finderEnabled()) return 0.0;
+    if (finderEnabled()) {
+        DDLog(@"视频号广告: 评论区广告高度设为 0");
+        return 0.0;
+    }
     return %orig;
 }
 - (double)heightForMediaWithRatio:(double)arg1 maxHeightPercentage:(double)arg2 minArea:(double)arg3 {
-    if (finderEnabled()) return 0.0;
+    if (finderEnabled()) {
+        DDLog(@"视频号广告: 评论区广告媒体高度设为 0");
+        return 0.0;
+    }
     return %orig;
 }
 - (void)updatePlayerViewWithCommentInfo:(id)arg1 videoInfo:(id)arg2 {
-    if (finderEnabled()) return;
+    if (finderEnabled()) {
+        DDLog(@"视频号广告: 阻止评论区广告播放器更新");
+        return;
+    }
     %orig;
 }
 - (void)updateImageViewWithCommentImageInfo:(id)arg1 imgInfo:(id)arg2 {
-    if (finderEnabled()) return;
+    if (finderEnabled()) {
+        DDLog(@"视频号广告: 阻止评论区广告图片更新");
+        return;
+    }
     %orig;
 }
 - (void)clickADContentActionWithArea:(NSInteger)arg1 {
-    if (finderEnabled()) return;
+    if (finderEnabled()) {
+        DDLog(@"视频号广告: 阻止评论区广告点击");
+        return;
+    }
     %orig;
 }
 - (id)commentAdReportDictWithReportScene:(NSInteger)arg1 {
-    if (finderEnabled()) return nil;
+    if (finderEnabled()) {
+        DDLog(@"视频号广告: 评论区广告上报返回 nil");
+        return nil;
+    }
     return %orig;
 }
 - (BOOL)canReportWithReportScene:(NSInteger)arg1 {
-    if (finderEnabled()) return NO;
+    if (finderEnabled()) {
+        DDLog(@"视频号广告: 评论区广告上报返回 NO");
+        return NO;
+    }
     return %orig;
 }
 %end
 
 %hook WCFinderCommentDetailViewController
 - (void)checkCommentAdPlayerExposeStateIfNeeded {
-    if (finderEnabled()) return;
+    if (finderEnabled()) {
+        DDLog(@"视频号广告: 阻止评论区广告曝光检查");
+        return;
+    }
     %orig;
 }
 - (void)reportCommentAd:(id)arg1 withReportScene:(NSInteger)arg2 {
-    if (finderEnabled()) return;
+    if (finderEnabled()) {
+        DDLog(@"视频号广告: 阻止评论区广告上报");
+        return;
+    }
     %orig;
 }
 - (void)reportCommentAdIfNeededWithReportScene:(NSInteger)arg2 {
-    if (finderEnabled()) return;
+    if (finderEnabled()) {
+        DDLog(@"视频号广告: 阻止评论区广告上报");
+        return;
+    }
     %orig;
 }
 - (void)_configADCellReportBehavior:(id)arg1 comment:(id)arg2 {
-    if (finderEnabled()) return;
+    if (finderEnabled()) {
+        DDLog(@"视频号广告: 阻止配置广告上报行为");
+        return;
+    }
     %orig;
 }
 - (void)commentAdCell:(id)arg1 clickFeedbackButton:(id)arg2 atSection:(NSInteger)arg3 {
-    if (finderEnabled()) return;
+    if (finderEnabled()) {
+        DDLog(@"视频号广告: 阻止评论区广告反馈按钮点击");
+        return;
+    }
     %orig;
 }
 - (void)commentAdCell:(id)arg1 longPressAtSection:(NSInteger)arg3 {
-    if (finderEnabled()) return;
+    if (finderEnabled()) {
+        DDLog(@"视频号广告: 阻止评论区广告长按");
+        return;
+    }
     %orig;
 }
 %end
 
-// 视频流广告（刷到的广告视频）
+// 视频流广告
 %hook WCFinderDataItem
 - (BOOL)isHardAdFeed {
-    if (finderEnabled()) return NO;
+    if (finderEnabled()) {
+        DDLog(@"视频号广告: isHardAdFeed 返回 NO");
+        return NO;
+    }
     return %orig;
 }
 - (BOOL)isHardAdLiveFeed {
-    if (finderEnabled()) return NO;
+    if (finderEnabled()) {
+        DDLog(@"视频号广告: isHardAdLiveFeed 返回 NO");
+        return NO;
+    }
     return %orig;
 }
 - (BOOL)isFromAdsStream {
-    if (finderEnabled()) return NO;
+    if (finderEnabled()) {
+        DDLog(@"视频号广告: isFromAdsStream 返回 NO");
+        return NO;
+    }
     return %orig;
 }
 - (void)setIsFromAdsStream:(BOOL)arg1 {
     if (finderEnabled()) {
+        DDLog(@"视频号广告: setIsFromAdsStream 强制设为 NO");
         %orig(NO);
         return;
     }
     %orig;
 }
 - (id)jumpInfoContainer {
-    if (finderEnabled()) return nil;
+    if (finderEnabled()) {
+        DDLog(@"视频号广告: jumpInfoContainer 返回 nil");
+        return nil;
+    }
     return %orig;
 }
 - (id)postJumpInfoContainer {
-    if (finderEnabled()) return nil;
+    if (finderEnabled()) {
+        DDLog(@"视频号广告: postJumpInfoContainer 返回 nil");
+        return nil;
+    }
     return %orig;
 }
 - (id)adLiveCoverUrl {
-    if (finderEnabled()) return nil;
+    if (finderEnabled()) {
+        DDLog(@"视频号广告: adLiveCoverUrl 返回 nil");
+        return nil;
+    }
     return %orig;
 }
 - (id)adsParams {
-    if (finderEnabled()) return nil;
+    if (finderEnabled()) {
+        DDLog(@"视频号广告: adsParams 返回 nil");
+        return nil;
+    }
     return %orig;
 }
 %end
 
 // ============================================================================
-//  4. 直播广告模块
+//  4. 直播广告模块（带日志）
 // ============================================================================
 
 static inline BOOL liveEnabled(void) {
@@ -539,32 +778,47 @@ static inline BOOL liveEnabled(void) {
 
 %hook WCFinderAdCountdownBannerView
 - (void)setupSubviews {
-    if (liveEnabled()) return;
+    if (liveEnabled()) {
+        DDLog(@"直播广告: setupSubviews 被阻止");
+        return;
+    }
     %orig;
 }
 - (void)startCountdown {
-    if (liveEnabled()) return;
+    if (liveEnabled()) {
+        DDLog(@"直播广告: startCountdown 被阻止");
+        return;
+    }
     %orig;
 }
 - (void)updateUIWithTime:(long long)arg1 {
-    if (liveEnabled()) return;
+    if (liveEnabled()) {
+        DDLog(@"直播广告: updateUIWithTime 被阻止");
+        return;
+    }
     %orig;
 }
 - (BOOL)adHasPlayOver {
-    if (liveEnabled()) return YES;
+    if (liveEnabled()) {
+        DDLog(@"直播广告: adHasPlayOver 返回 YES");
+        return YES;
+    }
     return %orig;
 }
 %end
 
 %hook WCFinderLiveHomePageViewController
 - (void)onAdSectionView:(id)arg1 selectElementVM:(id)arg2 {
-    if (liveEnabled()) return;
+    if (liveEnabled()) {
+        DDLog(@"直播广告: onAdSectionView 被阻止");
+        return;
+    }
     %orig;
 }
 %end
 
 // ============================================================================
-//  5. 搜索广告模块
+//  5. 搜索广告模块（带日志）
 // ============================================================================
 
 static inline BOOL searchEnabled(void) {
@@ -573,24 +827,29 @@ static inline BOOL searchEnabled(void) {
 
 %hook WCAdSearchH5Info
 - (BOOL)isValid {
-    if (searchEnabled()) return NO;
+    if (searchEnabled()) {
+        DDLog(@"搜索广告: WCAdSearchH5Info isValid 返回 NO");
+        return NO;
+    }
     return %orig;
 }
 + (id)fromXML:(struct XmlReaderNode_t *)arg1 {
-    if (searchEnabled()) return nil;
+    if (searchEnabled()) {
+        DDLog(@"搜索广告: WCAdSearchH5Info fromXML 返回 nil");
+        return nil;
+    }
     return %orig;
 }
 %end
 
 // ============================================================================
-//  6. 小程序广告模块（优化版：带防重复和清理）
+//  6. 小程序广告模块（带日志）
 // ============================================================================
 
 static inline BOOL miniProgramEnabled(void) {
     return [DDAdBlockConfig sharedConfig].master && [DDAdBlockConfig sharedConfig].miniProgram;
 }
 
-// 小程序专用 CSS
 static NSString *DDAdBlockMiniAppHideCSS(void) {
     return @"wx-ad,wx-ad-custom,ad,ad-custom,.wx-ad,.wx-ad-custom"
            @"{display:none!important;height:0!important;min-height:0!important;"
@@ -598,7 +857,6 @@ static NSString *DDAdBlockMiniAppHideCSS(void) {
            @"overflow:hidden!important;}";
 }
 
-// 注入 JS（带防重复和清理）
 static NSString *DDAdBlockMiniAppInjectJS(void) {
     return [NSString stringWithFormat:
         @"(function(){"
@@ -627,88 +885,126 @@ static NSString *DDAdBlockMiniAppInjectJS(void) {
         DDAdBlockMiniAppHideCSS()];
 }
 
-// 原生层拦截（保留原实现）
 %hook WAAppTaskSplashADConfig
 - (void)handleShowSplashAdCalled:(BOOL)arg1 {
-    if (miniProgramEnabled()) return;
+    if (miniProgramEnabled()) {
+        DDLog(@"小程序广告: handleShowSplashAdCalled 被阻止");
+        return;
+    }
     %orig;
 }
 %end
 
 %hook WAJSEventHandler_showSplashAd
 - (void)handleJSEvent:(id)arg1 {
-    if (miniProgramEnabled()) return;
+    if (miniProgramEnabled()) {
+        DDLog(@"小程序广告: WAJSEventHandler_showSplashAd 被阻止");
+        return;
+    }
     %orig;
 }
 %end
 
 %hook WAJSEventHandler_showSplashAdMenu
 - (void)handleJSEvent:(id)arg1 {
-    if (miniProgramEnabled()) return;
+    if (miniProgramEnabled()) {
+        DDLog(@"小程序广告: WAJSEventHandler_showSplashAdMenu 被阻止");
+        return;
+    }
     %orig;
 }
 %end
 
 %hook WAJSEventHandler_adOperateWXData
 - (void)handleJSEvent:(id)arg1 {
-    if (miniProgramEnabled()) return;
+    if (miniProgramEnabled()) {
+        DDLog(@"小程序广告: WAJSEventHandler_adOperateWXData 被阻止");
+        return;
+    }
     %orig;
 }
 %end
 
 %hook MagicAdCommonService
 - (id)getAdInfoWithPosId:(id)arg1 {
-    if (miniProgramEnabled()) return nil;
+    if (miniProgramEnabled()) {
+        DDLog(@"小程序广告: MagicAdCommonService getAdInfoWithPosId 返回 nil");
+        return nil;
+    }
     return %orig;
 }
 - (id)internalGetAdInfoFromCacheWithPosId:(id)arg1 {
-    if (miniProgramEnabled()) return nil;
+    if (miniProgramEnabled()) {
+        DDLog(@"小程序广告: MagicAdCommonService internalGetAdInfoFromCacheWithPosId 返回 nil");
+        return nil;
+    }
     return %orig;
 }
 - (void)getAdInfoAsyncWithPosId:(id)arg1 completion:(id)arg2 {
-    if (miniProgramEnabled()) return;
+    if (miniProgramEnabled()) {
+        DDLog(@"小程序广告: MagicAdCommonService getAdInfoAsync 被阻止");
+        return;
+    }
     %orig;
 }
 - (void)getAdInfoAsyncWithPosId:(id)arg1 timeoutMs:(long long)arg2 completion:(id)arg3 {
-    if (miniProgramEnabled()) return;
+    if (miniProgramEnabled()) {
+        DDLog(@"小程序广告: MagicAdCommonService getAdInfoAsync(timeout) 被阻止");
+        return;
+    }
     %orig;
 }
 - (void)triggerUpdateAdWithPosId:(id)arg1 pullType:(unsigned char)arg2 {
-    if (miniProgramEnabled()) return;
+    if (miniProgramEnabled()) {
+        DDLog(@"小程序广告: MagicAdCommonService triggerUpdateAd 被阻止");
+        return;
+    }
     %orig;
 }
 - (void)updateAdInfoByCGIInstantlyWithPosId:(id)arg1 pullType:(unsigned char)arg2 isDelayPull:(BOOL)arg3 {
-    if (miniProgramEnabled()) return;
+    if (miniProgramEnabled()) {
+        DDLog(@"小程序广告: MagicAdCommonService updateAdInfoByCGI 被阻止");
+        return;
+    }
     %orig;
 }
 %end
 
 %hook MagicAdCGIMgr
 + (void)getAdsCGIWithPosIds:(id)arg1 successBlock:(id)arg2 failBlock:(id)arg3 {
-    if (miniProgramEnabled()) return;
+    if (miniProgramEnabled()) {
+        DDLog(@"小程序广告: MagicAdCGIMgr getAdsCGI 被阻止");
+        return;
+    }
     %orig;
 }
 %end
 
 %hook MagicAdPushMgrService
 - (void)handleAdMsg:(id)arg1 {
-    if (miniProgramEnabled()) return;
+    if (miniProgramEnabled()) {
+        DDLog(@"小程序广告: MagicAdPushMgrService handleAdMsg 被阻止");
+        return;
+    }
     %orig;
 }
 %end
 
 %hook WCAdvertisePushService
 - (void)handlePushMsg:(id)arg1 {
-    if (miniProgramEnabled()) return;
+    if (miniProgramEnabled()) {
+        DDLog(@"小程序广告: WCAdvertisePushService handlePushMsg 被阻止");
+        return;
+    }
     %orig;
 }
 %end
 
-// WAWebViewController WebView 拦截（仅 webViewDidFinishLoad，带防重复）
 %hook WAWebViewController
 - (void)webViewDidFinishLoad:(id)arg1 navigation:(id)arg2 {
     %orig;
     if (!miniProgramEnabled()) return;
+    DDLog(@"小程序广告: 在 webViewDidFinishLoad 注入 JS");
     id wv = nil;
     @try {
         wv = [(id)self valueForKey:@"webView"];
@@ -721,6 +1017,7 @@ static NSString *DDAdBlockMiniAppInjectJS(void) {
     if (miniProgramEnabled() && !arg4) {
         NSString *u = [[(NSURLRequest *)arg2 URL] absoluteString];
         if (ddURLIsAd(u)) {
+            DDLog(@"小程序广告: 拦截广告 URL: %@", u);
             return NO;
         }
     }
@@ -729,7 +1026,7 @@ static NSString *DDAdBlockMiniAppInjectJS(void) {
 %end
 
 // ============================================================================
-//  7. 激励广告快速跳过模块
+//  7. 激励广告快速跳过模块（带日志）
 // ============================================================================
 
 static inline BOOL rewardedEnabled(void) {
@@ -739,6 +1036,7 @@ static inline BOOL rewardedEnabled(void) {
 %hook WCFinderRewardAdViewController
 - (void)viewDidAppear:(BOOL)arg1 {
     if (rewardedEnabled()) {
+        DDLog(@"激励广告: 快速跳过 (dismiss)");
         [(id)self dismissViewControllerAnimated:YES completion:nil];
         return;
     }
@@ -747,7 +1045,7 @@ static inline BOOL rewardedEnabled(void) {
 %end
 
 // ============================================================================
-//  8. 广告上报抑制（全局，不受子开关影响，仅依赖 master）
+//  8. 广告上报抑制（带日志）
 // ============================================================================
 
 static inline BOOL reportEnabled(void) {
@@ -756,45 +1054,72 @@ static inline BOOL reportEnabled(void) {
 
 %hook WCAdvertiseStatMgr
 - (id)getAdvertiseInfoForItem:(id)arg1 {
-    if (reportEnabled()) return nil;
+    if (reportEnabled()) {
+        DDLog(@"上报抑制: getAdvertiseInfoForItem 返回 nil");
+        return nil;
+    }
     return %orig;
 }
 - (void)logHeadImageH5:(id)arg1 {
-    if (reportEnabled()) return;
+    if (reportEnabled()) {
+        DDLog(@"上报抑制: logHeadImageH5 被阻止");
+        return;
+    }
     %orig;
 }
 - (void)logADBrandProfile:(id)arg1 {
-    if (reportEnabled()) return;
+    if (reportEnabled()) {
+        DDLog(@"上报抑制: logADBrandProfile 被阻止");
+        return;
+    }
     %orig;
 }
 - (void)logADFloatView:(id)arg1 {
-    if (reportEnabled()) return;
+    if (reportEnabled()) {
+        DDLog(@"上报抑制: logADFloatView 被阻止");
+        return;
+    }
     %orig;
 }
 - (void)logADPoiH5:(id)arg1 {
-    if (reportEnabled()) return;
+    if (reportEnabled()) {
+        DDLog(@"上报抑制: logADPoiH5 被阻止");
+        return;
+    }
     %orig;
 }
 - (void)logADH5:(id)arg1 withUserInfo:(id)arg2 reportType:(unsigned long long)arg3 {
-    if (reportEnabled()) return;
+    if (reportEnabled()) {
+        DDLog(@"上报抑制: logADH5 被阻止");
+        return;
+    }
     %orig;
 }
 - (void)logADCommentLog:(id)arg1 {
-    if (reportEnabled()) return;
+    if (reportEnabled()) {
+        DDLog(@"上报抑制: logADCommentLog 被阻止");
+        return;
+    }
     %orig;
 }
 - (void)logADBodyLog:(id)arg1 {
-    if (reportEnabled()) return;
+    if (reportEnabled()) {
+        DDLog(@"上报抑制: logADBodyLog 被阻止");
+        return;
+    }
     %orig;
 }
 - (void)reportAllFeedsADLog {
-    if (reportEnabled()) return;
+    if (reportEnabled()) {
+        DDLog(@"上报抑制: reportAllFeedsADLog 被阻止");
+        return;
+    }
     %orig;
 }
 %end
 
 // ============================================================================
-//  9. 设置界面
+//  9. 设置界面（新增日志分组）
 // ============================================================================
 
 @interface DDAdBlockSettingsViewController : UIViewController
@@ -822,10 +1147,12 @@ static inline BOOL reportEnabled(void) {
 
 - (void)buildSections {
     Class sectionCls = NSClassFromString(@"WCTableViewSectionManager");
+    Class cellCls = NSClassFromString(@"WCTableViewCellManager");
     DDAdBlockConfig *cfg = [DDAdBlockConfig sharedConfig];
 
     [_tableViewManager clearAllSection];
 
+    // 广告拦截场景
     WCTableViewSectionManager *secMain = [sectionCls defaultSection];
     secMain.headerTitle = @"广告屏蔽开关";
     [secMain addCell:[self switchCellWithTitle:@"启用广告拦截" on:cfg.master action:@selector(onMasterSwitch:)]];
@@ -837,11 +1164,19 @@ static inline BOOL reportEnabled(void) {
     [secMain addCell:[self switchCellWithTitle:@"屏蔽小程序广告" on:cfg.miniProgram action:@selector(onMiniProgramSwitch:)]];
     [_tableViewManager addSection:secMain];
 
+    // 进阶拦截
     WCTableViewSectionManager *secAdv = [sectionCls defaultSection];
     secAdv.headerTitle = @"进阶拦截";
     secAdv.footerTitle = @"开启后，激励广告将自动快速跳过（无需等待）";
     [secAdv addCell:[self switchCellWithTitle:@"激励广告快速跳过" on:cfg.rewardedFastPass action:@selector(onRewardedSwitch:)]];
     [_tableViewManager addSection:secAdv];
+
+    // 日志管理
+    WCTableViewSectionManager *secLog = [sectionCls defaultSection];
+    secLog.headerTitle = @"日志管理";
+    [secLog addCell:[cellCls normalCellForSel:@selector(exportLog) target:self title:@"导出日志"]];
+    [secLog addCell:[cellCls normalCellForSel:@selector(clearLog) target:self title:@"清空日志"]];
+    [_tableViewManager addSection:secLog];
 
     [_tableViewManager reloadTableView];
 }
@@ -851,6 +1186,7 @@ static inline BOOL reportEnabled(void) {
     return [cellCls switchCellForSel:action target:self title:title on:on];
 }
 
+#pragma mark - 开关回调
 - (void)onMasterSwitch:(UISwitch *)s       { [DDAdBlockConfig sharedConfig].master = s.isOn; }
 - (void)onMomentsSwitch:(UISwitch *)s      { [DDAdBlockConfig sharedConfig].moments = s.isOn; }
 - (void)onBrandSwitch:(UISwitch *)s        { [DDAdBlockConfig sharedConfig].brand = s.isOn; }
@@ -860,6 +1196,49 @@ static inline BOOL reportEnabled(void) {
 - (void)onMiniProgramSwitch:(UISwitch *)s  { [DDAdBlockConfig sharedConfig].miniProgram = s.isOn; }
 - (void)onRewardedSwitch:(UISwitch *)s     { [DDAdBlockConfig sharedConfig].rewardedFastPass = s.isOn; }
 
+#pragma mark - 日志操作
+- (void)exportLog {
+    NSString *logContent = [[DDAdBlockLogger sharedLogger] allLogs];
+    if (logContent.length == 0) {
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示"
+                                                                       message:@"日志为空"
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+        return;
+    }
+
+    // 保存到临时文件
+    NSString *tempPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"DDAdBlock.log"];
+    [logContent writeToFile:tempPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+
+    // 分享
+    NSURL *fileURL = [NSURL fileURLWithPath:tempPath];
+    UIActivityViewController *activityVC = [[UIActivityViewController alloc] initWithActivityItems:@[fileURL] applicationActivities:nil];
+    if (UI_USER_INTERFACE_IDIOM() == UIUserInterfaceIdiomPad) {
+        activityVC.popoverPresentationController.sourceView = self.view;
+        activityVC.popoverPresentationController.sourceRect = CGRectMake(CGRectGetMidX(self.view.bounds), CGRectGetMidY(self.view.bounds), 0, 0);
+    }
+    [self presentViewController:activityVC animated:YES completion:nil];
+}
+
+- (void)clearLog {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"确认清空"
+                                                                   message:@"确定要清空所有日志吗？"
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"清空" style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
+        [[DDAdBlockLogger sharedLogger] clearLogs];
+        // 提示
+        UIAlertController *done = [UIAlertController alertControllerWithTitle:@"已完成"
+                                                                      message:@"日志已清空"
+                                                               preferredStyle:UIAlertControllerStyleAlert];
+        [done addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:done animated:YES completion:nil];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
 @end
 
 // ============================================================================
@@ -868,6 +1247,7 @@ static inline BOOL reportEnabled(void) {
 
 %ctor {
     @autoreleasepool {
+        DDLog(@"========== DD广告拦截 插件加载 ==========");
         Class mgrClass = NSClassFromString(@"WCPluginsMgr");
         if (mgrClass) {
             id mgr = [mgrClass sharedInstance];
@@ -875,6 +1255,7 @@ static inline BOOL reportEnabled(void) {
                 [mgr registerControllerWithTitle:@"DD广告拦截"
                                          version:@"1.0.0"
                                       controller:@"DDAdBlockSettingsViewController"];
+                DDLog(@"插件注册成功");
             }
         }
     }
