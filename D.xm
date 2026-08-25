@@ -1,3 +1,16 @@
+//
+//  DDAdBlock.xm
+//  DD广告拦截 v1.0.0
+//
+//  说明:
+//  - 不使用宏, 所有方法显式书写
+//  - 不写 @class 前向声明, 也不 #import 微信私有头文件
+//    (Logos 的 %hook 运行时按类名查找, 方法体内只用 %orig 与系统 API)
+//  - 开关默认全关, 关闭立即 synchronize 持久化 (不会自动回弹)
+//  - 组织方式: 按开关顺序分模块, 每个模块的辅助代码就近放在本模块内部
+//    (如 WebView 黑名单/注入 JS/CSS 分别内聚在公众号模块和小程序模块里)
+//
+
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
 #import <WebKit/WebKit.h>
@@ -446,6 +459,10 @@ static NSString * const DDAdBlockMPHideCSS =
 %end
 
 // ----- 3.2 视频流广告 (刷到的广告视频, 仅第一层) -----
+// 依据 WCFinderDataItem 真实头文件: 广告判定接口为
+// isHardAdFeed / isHardAdLiveFeed / isFromAdsStream / adFlag 等.
+// 让微信自身认为 "该 item 不是广告", 列表插入/角标/素材请求/上报全部失效,
+// 不碰 Cell, 不碰播放器.
 %hook WCFinderDataItem
 - (BOOL)isHardAdFeed {
     if (ddFinderOn()) return NO;
@@ -754,7 +771,7 @@ static NSString * const DDAdBlockMiniAppHideCSS =
 %end
 
 // ============================================================================
-//  9. 设置界面（仅修改此部分，其他代码完全保留）
+//  9. 设置界面 (优化版)
 // ============================================================================
 
 @interface DDAdBlockSettingsViewController : UIViewController
@@ -763,19 +780,10 @@ static NSString * const DDAdBlockMiniAppHideCSS =
 
 @implementation DDAdBlockSettingsViewController
 
-// 参考 DD后台高斯模糊：用 NSClassFromString 延迟取类，编译期不依赖私有头文件
-- (void)ensureTableViewManager {
-    if (_tableViewManager) return;
-    Class managerCls = NSClassFromString(@"WCTableViewManager");
-    if (!managerCls) return;
-    id mgr = [managerCls alloc];
-    _tableViewManager = [mgr initWithFrame:self.view.bounds
-                                     style:UITableViewStyleInsetGrouped];
-}
-
 - (instancetype)init {
-    if (self = [super init]) {
-        [self ensureTableViewManager];
+    self = [super init];
+    if (self) {
+        // 延迟初始化 tableViewManager，避免在 init 时依赖 view 尺寸
     }
     return self;
 }
@@ -785,80 +793,115 @@ static NSString * const DDAdBlockMiniAppHideCSS =
     self.title = @"DD广告拦截";
     self.view.backgroundColor = [UIColor systemBackgroundColor];
 
-    [self ensureTableViewManager];
-    if (!_tableViewManager) return;
-    [self buildTable];
+    [self setupTableViewManager];
+    [self buildSections];
+}
 
-    // 参考代码：用 getTableView（不是 .tableView 属性，严格匹配头文件）
-    UITableView *tableView = [_tableViewManager getTableView];
+- (void)setupTableViewManager {
+    if (_tableViewManager) return;
+    Class mgrCls = NSClassFromString(@"WCTableViewManager");
+    if (!mgrCls) {
+        // 若类不存在，给个占位提示
+        UILabel *label = [[UILabel alloc] initWithFrame:self.view.bounds];
+        label.text = @"无法加载设置界面（依赖类不存在）";
+        label.textAlignment = NSTextAlignmentCenter;
+        label.textColor = [UIColor secondaryLabelColor];
+        [self.view addSubview:label];
+        return;
+    }
+    _tableViewManager = [[mgrCls alloc] initWithFrame:self.view.bounds
+                                                style:UITableViewStyleInsetGrouped];
+    UITableView *tableView = [self.tableViewManager getTableView];
     tableView.frame = self.view.bounds;
     tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     tableView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentAutomatic;
     [self.view addSubview:tableView];
 }
 
-- (void)buildTable {
+- (void)buildSections {
+    if (!_tableViewManager) return;
     Class sectionCls = NSClassFromString(@"WCTableViewSectionManager");
     Class cellCls = NSClassFromString(@"WCTableViewCellManager");
-    if (!sectionCls || !cellCls || !_tableViewManager) return;
+    if (!sectionCls || !cellCls) return;
 
     DDAdBlockConfig *cfg = [DDAdBlockConfig sharedConfig];
 
-    // 清空所有 section 后重建（API: clearAllSection，单数，严格匹配头文件）
+    // 清空旧数据
     [_tableViewManager clearAllSection];
 
-    // 广告拦截场景分组：用头文件真实存在的 sectionInfoHeader: 创建带标题的分组
-    id secMain = [sectionCls sectionInfoHeader:@"广告拦截场景"];
-    [secMain addCell:[cellCls switchCellForSel:@selector(onMasterSwitch:)
-                                         target:self
-                                          title:@"启用广告拦截"
-                                             on:cfg.master]];
-    [secMain addCell:[cellCls switchCellForSel:@selector(onMomentsSwitch:)
-                                         target:self
-                                          title:@"屏蔽朋友圈广告"
-                                             on:cfg.moments]];
-    [secMain addCell:[cellCls switchCellForSel:@selector(onBrandSwitch:)
-                                         target:self
-                                          title:@"屏蔽公众号广告"
-                                             on:cfg.brand]];
-    [secMain addCell:[cellCls switchCellForSel:@selector(onFinderSwitch:)
-                                         target:self
-                                          title:@"屏蔽视频号广告"
-                                             on:cfg.finder]];
-    [secMain addCell:[cellCls switchCellForSel:@selector(onLiveSwitch:)
-                                         target:self
-                                          title:@"屏蔽直播广告"
-                                             on:cfg.live]];
-    [secMain addCell:[cellCls switchCellForSel:@selector(onSearchSwitch:)
-                                         target:self
-                                          title:@"屏蔽搜索广告"
-                                             on:cfg.search]];
-    [secMain addCell:[cellCls switchCellForSel:@selector(onMiniProgramSwitch:)
-                                         target:self
-                                          title:@"屏蔽小程序广告"
-                                             on:cfg.miniProgram]];
+    // ---- 主 Section ----
+    id secMain = [sectionCls defaultSection];
+    secMain.headerTitle = @"广告屏蔽开关";
+    [secMain addCell:[self switchCellWithTitle:@"启用广告拦截"
+                                            on:cfg.master
+                                        action:@selector(onMasterSwitch:)]];
+    [secMain addCell:[self switchCellWithTitle:@"屏蔽朋友圈广告"
+                                            on:cfg.moments
+                                        action:@selector(onMomentsSwitch:)]];
+    [secMain addCell:[self switchCellWithTitle:@"屏蔽公众号广告"
+                                            on:cfg.brand
+                                        action:@selector(onBrandSwitch:)]];
+    [secMain addCell:[self switchCellWithTitle:@"屏蔽视频号广告"
+                                            on:cfg.finder
+                                        action:@selector(onFinderSwitch:)]];
+    [secMain addCell:[self switchCellWithTitle:@"屏蔽直播广告"
+                                            on:cfg.live
+                                        action:@selector(onLiveSwitch:)]];
+    [secMain addCell:[self switchCellWithTitle:@"屏蔽搜索广告"
+                                            on:cfg.search
+                                        action:@selector(onSearchSwitch:)]];
+    [secMain addCell:[self switchCellWithTitle:@"屏蔽小程序广告"
+                                            on:cfg.miniProgram
+                                        action:@selector(onMiniProgramSwitch:)]];
     [_tableViewManager addSection:secMain];
 
-    // 进阶拦截分组：仅激励广告快速跳过，同样用 sectionInfoHeader: 带标题
-    id secAdv = [sectionCls sectionInfoHeader:@"进阶拦截"];
-    [secAdv addCell:[cellCls switchCellForSel:@selector(onRewardedSwitch:)
-                                        target:self
-                                         title:@"激励广告快速跳过"
-                                            on:cfg.rewardedFastPass]];
+    // ---- 进阶拦截 Section ----
+    id secAdv = [sectionCls defaultSection];
+    secAdv.headerTitle = @"进阶拦截";
+    secAdv.footerTitle = @"开启后，激励广告将自动快速跳过（无需等待）";
+    [secAdv addCell:[self switchCellWithTitle:@"激励广告快速跳过"
+                                           on:cfg.rewardedFastPass
+                                       action:@selector(onRewardedSwitch:)]];
     [_tableViewManager addSection:secAdv];
 
-    // 刷新表格，严格匹配头文件的 reloadTableView 方法
     [_tableViewManager reloadTableView];
 }
 
-- (void)onMasterSwitch:(UISwitch *)s      { [DDAdBlockConfig sharedConfig].master = s.isOn;            [self buildTable]; }
-- (void)onMomentsSwitch:(UISwitch *)s     { [DDAdBlockConfig sharedConfig].moments = s.isOn; }
-- (void)onBrandSwitch:(UISwitch *)s       { [DDAdBlockConfig sharedConfig].brand = s.isOn; }
-- (void)onFinderSwitch:(UISwitch *)s      { [DDAdBlockConfig sharedConfig].finder = s.isOn; }
-- (void)onLiveSwitch:(UISwitch *)s        { [DDAdBlockConfig sharedConfig].live = s.isOn; }
-- (void)onSearchSwitch:(UISwitch *)s      { [DDAdBlockConfig sharedConfig].search = s.isOn; }
-- (void)onMiniProgramSwitch:(UISwitch *)s { [DDAdBlockConfig sharedConfig].miniProgram = s.isOn; }
-- (void)onRewardedSwitch:(UISwitch *)s    { [DDAdBlockConfig sharedConfig].rewardedFastPass = s.isOn; }
+// 辅助方法：创建开关 Cell
+- (id)switchCellWithTitle:(NSString *)title on:(BOOL)on action:(SEL)action {
+    Class cellCls = NSClassFromString(@"WCTableViewCellManager");
+    if (!cellCls) return nil;
+    return [cellCls switchCellForSel:action
+                              target:self
+                               title:title
+                                  on:on];
+}
+
+// 开关回调（仅保存配置，不重建表）
+- (void)onMasterSwitch:(UISwitch *)s {
+    [DDAdBlockConfig sharedConfig].master = s.isOn;
+}
+- (void)onMomentsSwitch:(UISwitch *)s {
+    [DDAdBlockConfig sharedConfig].moments = s.isOn;
+}
+- (void)onBrandSwitch:(UISwitch *)s {
+    [DDAdBlockConfig sharedConfig].brand = s.isOn;
+}
+- (void)onFinderSwitch:(UISwitch *)s {
+    [DDAdBlockConfig sharedConfig].finder = s.isOn;
+}
+- (void)onLiveSwitch:(UISwitch *)s {
+    [DDAdBlockConfig sharedConfig].live = s.isOn;
+}
+- (void)onSearchSwitch:(UISwitch *)s {
+    [DDAdBlockConfig sharedConfig].search = s.isOn;
+}
+- (void)onMiniProgramSwitch:(UISwitch *)s {
+    [DDAdBlockConfig sharedConfig].miniProgram = s.isOn;
+}
+- (void)onRewardedSwitch:(UISwitch *)s {
+    [DDAdBlockConfig sharedConfig].rewardedFastPass = s.isOn;
+}
 
 @end
 
