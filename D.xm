@@ -1,6 +1,6 @@
 //
 //  DDAdBlock.xm
-//  DD广告拦截 v1.0.0（带日志调试版）
+//  DD广告拦截 v1.0.0（带日志调试版，修复 iOS 13+ 弃用 API）
 //
 //  新增功能：
 //  - 日志记录所有拦截动作（原生层、WebView URL、DOM 清理、Cell 隐藏）
@@ -1215,7 +1215,8 @@ static inline BOOL reportEnabled(void) {
     // 分享
     NSURL *fileURL = [NSURL fileURLWithPath:tempPath];
     UIActivityViewController *activityVC = [[UIActivityViewController alloc] initWithActivityItems:@[fileURL] applicationActivities:nil];
-    if (UI_USER_INTERFACE_IDIOM() == UIUserInterfaceIdiomPad) {
+    // 使用现代 API 检测 iPad
+    if ([UIDevice currentDevice].userInterfaceIdiom == UIUserInterfaceIdiomPad) {
         activityVC.popoverPresentationController.sourceView = self.view;
         activityVC.popoverPresentationController.sourceRect = CGRectMake(CGRectGetMidX(self.view.bounds), CGRectGetMidY(self.view.bounds), 0, 0);
     }
