@@ -1,6 +1,6 @@
 //
 //  DDAdBlock.xm
-//  插件名: DD广告拦截   版本: 1.0.9
+//  插件名: DD广告拦截   版本: 1.0.10
 //
 //  变更记录:
 //  - 1.0.3: 规范化缩进；开关不回弹、无宏；进阶仅留激励快过
@@ -27,7 +27,7 @@
 //       checkCommentAdPlayerExposeStateIfNeeded / clearCommentAdState
 //
 //  因此策略（简洁、无猜测）:
-//    A. Cell 视图层 neutralize: updateWithModel 短路 + resetCellData + hidden
+//    A. Cell 视图层 neutralize: updateWithModel 短路 + 运行时隐藏(setHidden:)
 //       高度 → 0pt（sectionHeight + cell 级 heightForMedia 均返回 0）
 //       → 不破坏 dataSource 计数，不 return nil，防闪退
 //    B. 控制器层: 曝光/上报/点击全部短路
@@ -47,6 +47,7 @@
 #import <Foundation/Foundation.h>
 #import <WebKit/WebKit.h>
 #import <objc/runtime.h>
+#import <objc/message.h>  // class_respondsToSelector / methodForSelector:
 
 // ========== 插件管理入口 ==========
 @interface WCPluginsMgr : NSObject
@@ -375,16 +376,21 @@ static NSString *DDAdBlockMPHideCSS(void) {
 %hook WCFinderCommentAdTableViewCell
 
 // 更新入口: 调用原始实现保证内部状态一致，随后清空 + 隐藏
+// 注意: 所有方法调用均通过 objc_msgSend 运行时派发，不用中括号 [cell xxx]
+//       原因: WCFinderCommentAdTableViewCell 仅有 @class 前向声明，
+//             ARC 会对中括号调用做静态选择器校验并报错
+//             (no known instance method for selector 'resetCellData')。
+//             故一律走 SEL + IMP 派发，存在性由 class_respondsToSelector 保证。
 - (void)updateWithModel:(id)arg1 width:(double)arg2 {
     if (ddActive() && [DDAdBlockConfig sharedConfig].finder) {
-        %orig;  // 保留原始调用，避免空内容 crash
-        // 用 id 类型 + respondsToSelector:，规避前向声明不完整导致的编译报错
-        id cell = (id)self;
-        if ([cell respondsToSelector:@selector(resetCellData)]) {
-            [cell resetCellData];
-        }
-        if ([cell respondsToSelector:@selector(setHidden:)]) {
-            [cell setHidden:YES];
+        %orig;  // 保留原始调用，保证内部状态机正常，避免空内容 crash
+
+        // 隐藏 cell（等同 self.hidden = YES），运行时派发
+        SEL setHiddenSel = @selector(setHidden:);
+        if (class_respondsToSelector([(id)self class], setHiddenSel)) {
+            void (*imp)(id, SEL, BOOL) = (void (*)(id, SEL, BOOL))
+                [(id)self methodForSelector:setHiddenSel];
+            if (imp) imp((id)self, setHiddenSel, YES);
         }
         return;
     }
