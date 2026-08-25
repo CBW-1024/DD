@@ -746,7 +746,6 @@ static inline BOOL rewardedEnabled(void) {
 
 - (void)buildSections {
     Class sectionCls = NSClassFromString(@"WCTableViewSectionManager");
-    Class cellCls = NSClassFromString(@"WCTableViewCellManager");
     DDAdBlockConfig *cfg = [DDAdBlockConfig sharedConfig];
 
     [_tableViewManager clearAllSection];
@@ -771,7 +770,7 @@ static inline BOOL rewardedEnabled(void) {
     [_tableViewManager reloadTableView];
 }
 
-- (WCTableViewCellManager *)switchCellWithTitle:(NSString *)title on:(BOOL)on action:(SEL)action {
+- (id)switchCellWithTitle:(NSString *)title on:(BOOL)on action:(SEL)action {
     Class cellCls = NSClassFromString(@"WCTableViewCellManager");
     return [cellCls switchCellForSel:action target:self title:title on:on];
 }
