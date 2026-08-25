@@ -1,13 +1,12 @@
 //
 //  DDAdBlock.xm
-//  DD广告拦截 v1.0.0（最终版）
+//  DD广告拦截 v1.0.0（最终版，仅更新公众号/小程序 WebView 拦截）
 //
 //  特点：
 //  - 每个广告模块完全自包含（开关判断 + 辅助函数）
 //  - 配置单例全局共享
 //  - 不依赖私有头文件，仅运行时查找类
-//  - 已移除上报抑制模块
-//  - 全局工具函数已内聚到视频号模块
+//  - 公众号/小程序采用去广告.xm 的最新 WebView 拦截方案（URL黑名单 + 注入JS + DOM sweep）
 //
 
 #import <UIKit/UIKit.h>
@@ -224,59 +223,82 @@ static inline BOOL momentsEnabled(void) {
 %end
 
 // ============================================================================
-//  2. 公众号广告模块
+//  2. 公众号广告模块（新方案：注入 WKUserScript + URL 拦截 + DOM 清理）
 // ============================================================================
 
 static inline BOOL brandEnabled(void) {
     return [DDAdBlockConfig sharedConfig].master && [DDAdBlockConfig sharedConfig].brand;
 }
 
-static NSString * const DDAdBlockMPURLBlocklist[] = {
-    @"wxs.qq.com/tmpl/px", @"wxs.qq.com/tmpl/lite", @"wxs.qq.com/tmpl",
-    @"mmbiz-bin/ad", @"ad.weixin.qq.com", @"cgi-bin/mmbiz-bin/ad",
-    @"getappmsgad", @"magicad", @"magic-ad", @"posId=", nil
-};
+// 公众号专用 CSS（隐藏 iframe/评论区广告等）
+static NSString *DDAdBlockMPHideCSS(void) {
+    return @".iframe_ad_container,.iframe_adv_ad_container,.comment-ad-container,"
+           @"li.cidad_comment_constant_key,#cidad_comment_constant_key,"
+           @".adv_keyword_search,.ad_control-tips"
+           @"{display:none!important;height:0!important;min-height:0!important;"
+           @"margin:0!important;padding:0!important;overflow:hidden!important;}";
+}
 
-static BOOL ddMPURLIsAd(NSURL *url) {
-    if (!url) return NO;
-    NSString *absolute = url.absoluteString;
-    if (!absolute) return NO;
-    for (NSInteger i = 0; DDAdBlockMPURLBlocklist[i] != nil; i++) {
-        if ([absolute rangeOfString:DDAdBlockMPURLBlocklist[i] options:NSCaseInsensitiveSearch].location != NSNotFound) {
-            return YES;
-        }
+static NSString *DDAdBlockMPHideParentCSS(void) {
+    return @"div:has(> .iframe_ad_container),li:has(> .comment-ad-container)"
+           @"{display:none!important;height:0!important;}";
+}
+
+// 注入 JS（包含 CSS + 周期性 DOM 扫描 + MutationObserver）
+static NSString *DDAdBlockInjectJS(void) {
+    return [NSString stringWithFormat:
+        @"(function(){try{"
+        @"if(!document.getElementById('__dd_adblock')){"
+        @"var s=document.createElement('style');s.id='__dd_adblock';"
+        @"s.textContent='%@'+'%@';"
+        @"(document.head||document.documentElement).appendChild(s);}"
+        @"var sweep=function(){try{Array.prototype.forEach.call("
+        @"document.querySelectorAll('.iframe_ad_container,.comment-ad-container'),"
+        @"function(e){var p=e.parentElement,n=0;"
+        @"while(p&&n<3){if(p.tagName==='LI'||(p.className&&/comment-ad|discuss_media/.test(p.className))){"
+        @"p.style.setProperty('display','none','important');break;}p=p.parentElement;n++;}});}catch(e){}};"
+        @"sweep();"
+        @"if(!window.__dd_ob&&window.MutationObserver){"
+        @"var t=null;window.__dd_ob=new MutationObserver(function(){"
+        @"if(t)return;t=setTimeout(function(){t=null;sweep();},300);});"
+        @"window.__dd_ob.observe(document.documentElement,{childList:true,subtree:true});}"
+        @"}catch(e){}})();",
+        DDAdBlockMPHideCSS(), DDAdBlockMPHideParentCSS()];
+}
+
+// URL 黑名单（覆盖公众号/小程序广告素材、联盟广告等）
+static NSArray<NSString *> *DDAdBlockURLBlocklist(void) {
+    static NSArray *list;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        list = @[
+            @"wxa.wxs.qq.com/tmpl/px/",
+            @"wxa.wxs.qq.com/tmpl/lite/",
+            @"support.weixin.qq.com/cgi-bin/mmsupport-bin/",
+            @"wxapp.tc.qq.com/ad/",
+            @"cpro.baidu.com",
+            @"pos.baidu.com",
+            @"go.mobile.qq.com/ad",
+            @"/cgi-bin/mmbiz-bin/ad",
+            @"ad.weixin.qq.com",
+            @"wxad",
+            @"adunit-",
+            @"_ad_",
+            @"&adpos=",
+        ];
+    });
+    return list;
+}
+
+static BOOL ddURLIsAd(NSString *url) {
+    if (url.length == 0) return NO;
+    for (NSString *sub in DDAdBlockURLBlocklist()) {
+        if ([url containsString:sub]) return YES;
     }
     return NO;
 }
 
-static NSString * const DDAdBlockMPInjectJS =
-@"(function(){"
-@"var s=document.createElement('style');"
-@"s.textContent='[class*=ad],[id*=ad],[class*=Ad],"
-@"[class*=advert],iframe[src*=ad],.ad-container,.ad_box,"
-@".ad-card,.ad_banner,.ad_feed,.ad-mask,.ad-cover,.ad-slot{"
-@"display:none!important;width:0!important;height:0!important;"
-@"overflow:hidden!important;opacity:0!important;}';"
-@"document.head.appendChild(s);"
-@"function sweep(){"
-@"var all=document.querySelectorAll("
-@"'[class*=ad],[id*=ad],[class*=Ad],[class*=advert]');"
-@"for(var i=0;i<all.length;i++){"
-@"var r=all[i].getBoundingClientRect();"
-@"if(r.width>0&&r.height>0){all[i].style.cssText+='display:none!important;';}}"
-@"}"
-@"setInterval(sweep,1500);sweep();"
-@"})();";
-
-static NSString * const DDAdBlockMPHideCSS =
-@".iframe_ad_container,.iframe_adv_ad_container,.comment-ad-container,"
-@"li.cidad_comment_constant_key,#cidad_comment_constant_key,"
-@"adv_keyword_search,.ad_control-tips{display:none!important;"
-@"height:0!important;min-height:0!important;margin:0!important;"
-@"padding:0!important;overflow:hidden!important;}"
-@"div:has(> .iframe_ad_container),"
-@"li:has(> .comment-ad-container){display:none!important;height:0!important;}";
-
+// 原生数据层拦截（保留原实现）
 %hook BrandTLExptConfig
 - (BOOL)isExptNotShowAd {
     if (brandEnabled()) return YES;
@@ -318,27 +340,43 @@ static NSString * const DDAdBlockMPHideCSS =
 }
 %end
 
+// MMWebViewController WebView 拦截
 %hook MMWebViewController
-- (void)webView:(id)webView decidePolicyForNavigationAction:(id)action
-        decisionHandler:(void (^)(NSInteger))decisionHandler {
-    if (brandEnabled()) {
-        NSURL *url = nil;
-        @try { url = [(id)action valueForKey:@"URL"]; } @catch (__unused NSException *e) {}
-        if (url && ddMPURLIsAd(url)) {
-            if (decisionHandler) decisionHandler(2);
-            return;
+- (id)webViewUserScriptsForConfiguration {
+    id scripts = %orig;
+    if (!brandEnabled()) return scripts;
+    NSMutableArray *arr = [scripts isKindOfClass:[NSArray class]]
+        ? [(NSArray *)scripts mutableCopy]
+        : [NSMutableArray array];
+    WKUserScript *us = [[WKUserScript alloc] initWithSource:DDAdBlockInjectJS()
+                                              injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+                                           forMainFrameOnly:NO];
+    [arr addObject:us];
+    return arr;
+}
+
+- (BOOL)webView:(id)arg1 shouldStartLoadWithRequest:(id)arg2 navigationType:(long long)arg3 isMainFrame:(BOOL)arg4 navigationAction:(id)arg5 {
+    if (brandEnabled() && !arg4) {
+        NSString *u = [[(NSURLRequest *)arg2 URL] absoluteString];
+        if ([u containsString:@"wxa.wxs.qq.com"] && [u containsString:@"/tmpl/px/"]) {
+            return NO;
+        }
+        if (ddURLIsAd(u)) {
+            return NO;
         }
     }
-    %orig;
+    return %orig;
 }
-- (void)webView:(id)webView didFinishNavigation:(id)navigation {
+
+- (void)webViewDidFinishLoad:(id)arg1 navigation:(id)arg2 {
     %orig;
     if (!brandEnabled()) return;
     WKWebView *wv = nil;
-    @try { wv = [(id)self valueForKey:@"webView"]; } @catch (__unused NSException *e) {}
+    @try {
+        wv = [(id)self valueForKey:@"webView"];
+    } @catch (__unused NSException *e) {}
     if (![wv isKindOfClass:[WKWebView class]]) return;
-    [wv evaluateJavaScript:DDAdBlockMPInjectJS completionHandler:nil];
-    [wv evaluateJavaScript:DDAdBlockMPHideCSS completionHandler:nil];
+    [wv evaluateJavaScript:DDAdBlockInjectJS() completionHandler:nil];
 }
 %end
 
@@ -549,56 +587,44 @@ static inline BOOL searchEnabled(void) {
 %end
 
 // ============================================================================
-//  6. 小程序广告模块
+//  6. 小程序广告模块（新方案：原生层拦截 + WebView URL 黑名单 + DOM 隐藏）
 // ============================================================================
 
 static inline BOOL miniProgramEnabled(void) {
     return [DDAdBlockConfig sharedConfig].master && [DDAdBlockConfig sharedConfig].miniProgram;
 }
 
-static NSString * const DDAdBlockMiniAppURLBlocklist[] = {
-    @"wxs.qq.com/tmpl/px", @"wxs.qq.com/tmpl/lite", @"wxs.qq.com/tmpl",
-    @"mmbiz-bin/ad", @"ad.weixin.qq.com", @"cgi-bin/mmbiz-bin/ad",
-    @"getappmsgad", @"magicad", @"magic-ad", @"posId=", nil
-};
-
-static BOOL ddMiniAppURLIsAd(NSURL *url) {
-    if (!url) return NO;
-    NSString *absolute = url.absoluteString;
-    if (!absolute) return NO;
-    for (NSInteger i = 0; DDAdBlockMiniAppURLBlocklist[i] != nil; i++) {
-        if ([absolute rangeOfString:DDAdBlockMiniAppURLBlocklist[i] options:NSCaseInsensitiveSearch].location != NSNotFound) {
-            return YES;
-        }
-    }
-    return NO;
+// 小程序专用 CSS（隐藏 <wx-ad> 等原生组件）
+static NSString *DDAdBlockMiniAppHideCSS(void) {
+    return @"wx-ad,wx-ad-custom,ad,ad-custom,.wx-ad,.wx-ad-custom"
+           @"{display:none!important;height:0!important;min-height:0!important;"
+           @"max-height:0!important;margin:0!important;padding:0!important;"
+           @"overflow:hidden!important;}";
 }
 
-static NSString * const DDAdBlockMiniAppInjectJS =
-@"(function(){"
-@"var s=document.createElement('style');"
-@"s.textContent='[class*=ad],[id*=ad],[class*=Ad],"
-@"[class*=advert],iframe[src*=ad],.ad-container,.ad_box,"
-@".ad-card,.ad_banner,.ad_feed,.ad-mask,.ad-cover,.ad-slot{"
-@"display:none!important;width:0!important;height:0!important;"
-@"overflow:hidden!important;opacity:0!important;}';"
-@"document.head.appendChild(s);"
-@"function sweep(){"
-@"var all=document.querySelectorAll("
-@"'[class*=ad],[id*=ad],[class*=Ad],[class*=advert]');"
-@"for(var i=0;i<all.length;i++){"
-@"var r=all[i].getBoundingClientRect();"
-@"if(r.width>0&&r.height>0){all[i].style.cssText+='display:none!important;';}}"
-@"}"
-@"setInterval(sweep,1500);sweep();"
-@"})();";
+// 小程序注入 JS（含 CSS + DOM 扫描 + MutationObserver）
+static NSString *DDAdBlockMiniAppInjectJS(void) {
+    return [NSString stringWithFormat:
+        @"(function(){try{"
+        @"if(!document.getElementById('__dd_adblock_wa')){"
+        @"var s=document.createElement('style');s.id='__dd_adblock_wa';"
+        @"s.textContent='%@';"
+        @"(document.head||document.documentElement).appendChild(s);}"
+        @"var sweep=function(){try{Array.prototype.forEach.call("
+        @"document.querySelectorAll('wx-ad,wx-ad-custom,.wx-ad,.wx-ad-custom'),"
+        @"function(e){e.style.setProperty('display','none','important');"
+        @"e.style.setProperty('height','0','important');"
+        @"e.style.setProperty('max-height','0','important');});}catch(e){}};"
+        @"sweep();"
+        @"if(!window.__dd_ob_wa&&window.MutationObserver){"
+        @"var t=null;window.__dd_ob_wa=new MutationObserver(function(){"
+        @"if(t)return;t=setTimeout(function(){t=null;sweep();},300);});"
+        @"window.__dd_ob_wa.observe(document.documentElement,{childList:true,subtree:true});}"
+        @"}catch(e){}})();",
+        DDAdBlockMiniAppHideCSS()];
+}
 
-static NSString * const DDAdBlockMiniAppHideCSS =
-@"wx-ad,wx-ad-custom,ad,ad-custom,"
-@".wx-ad,.wx-ad-custom{display:none!important;height:0!important;"
-@"min-height:0!important;max-height:0!important;margin:0!important;"
-@"padding:0!important;overflow:hidden!important;}";
-
+// 原生层拦截（保留原实现）
 %hook WAAppTaskSplashADConfig
 - (void)handleShowSplashAdCalled:(BOOL)arg1 {
     if (miniProgramEnabled()) return;
@@ -675,27 +701,27 @@ static NSString * const DDAdBlockMiniAppHideCSS =
 }
 %end
 
+// WAWebViewController WebView 拦截
 %hook WAWebViewController
-- (void)webView:(id)webView decidePolicyForNavigationAction:(id)action
-        decisionHandler:(void (^)(NSInteger))decisionHandler {
-    if (miniProgramEnabled()) {
-        NSURL *url = nil;
-        @try { url = [(id)action valueForKey:@"URL"]; } @catch (__unused NSException *e) {}
-        if (url && ddMiniAppURLIsAd(url)) {
-            if (decisionHandler) decisionHandler(2);
-            return;
-        }
-    }
-    %orig;
-}
-- (void)webView:(id)webView didFinishNavigation:(id)navigation {
+- (void)webViewDidFinishLoad:(id)arg1 navigation:(id)arg2 {
     %orig;
     if (!miniProgramEnabled()) return;
     id wv = nil;
-    @try { wv = [(id)self valueForKey:@"webView"]; } @catch (__unused NSException *e) {}
+    @try {
+        wv = [(id)self valueForKey:@"webView"];
+    } @catch (__unused NSException *e) {}
     if (![wv respondsToSelector:@selector(evaluateJavaScript:completionHandler:)]) return;
-    [wv evaluateJavaScript:DDAdBlockMiniAppInjectJS completionHandler:nil];
-    [wv evaluateJavaScript:DDAdBlockMiniAppHideCSS completionHandler:nil];
+    [wv evaluateJavaScript:DDAdBlockMiniAppInjectJS() completionHandler:nil];
+}
+
+- (BOOL)webView:(id)arg1 shouldStartLoadWithRequest:(id)arg2 navigationType:(long long)arg3 isMainFrame:(BOOL)arg4 navigationAction:(id)arg5 {
+    if (miniProgramEnabled() && !arg4) {
+        NSString *u = [[(NSURLRequest *)arg2 URL] absoluteString];
+        if (ddURLIsAd(u)) {
+            return NO;
+        }
+    }
+    return %orig;
 }
 %end
 
@@ -718,7 +744,54 @@ static inline BOOL rewardedEnabled(void) {
 %end
 
 // ============================================================================
-//  8. 设置界面
+//  8. 广告上报抑制（全局，不受子开关影响，仅依赖 master）
+// ============================================================================
+
+static inline BOOL reportEnabled(void) {
+    return [DDAdBlockConfig sharedConfig].master;
+}
+
+%hook WCAdvertiseStatMgr
+- (id)getAdvertiseInfoForItem:(id)arg1 {
+    if (reportEnabled()) return nil;
+    return %orig;
+}
+- (void)logHeadImageH5:(id)arg1 {
+    if (reportEnabled()) return;
+    %orig;
+}
+- (void)logADBrandProfile:(id)arg1 {
+    if (reportEnabled()) return;
+    %orig;
+}
+- (void)logADFloatView:(id)arg1 {
+    if (reportEnabled()) return;
+    %orig;
+}
+- (void)logADPoiH5:(id)arg1 {
+    if (reportEnabled()) return;
+    %orig;
+}
+- (void)logADH5:(id)arg1 withUserInfo:(id)arg2 reportType:(unsigned long long)arg3 {
+    if (reportEnabled()) return;
+    %orig;
+}
+- (void)logADCommentLog:(id)arg1 {
+    if (reportEnabled()) return;
+    %orig;
+}
+- (void)logADBodyLog:(id)arg1 {
+    if (reportEnabled()) return;
+    %orig;
+}
+- (void)reportAllFeedsADLog {
+    if (reportEnabled()) return;
+    %orig;
+}
+%end
+
+// ============================================================================
+//  9. 设置界面
 // ============================================================================
 
 @interface DDAdBlockSettingsViewController : UIViewController
