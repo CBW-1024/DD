@@ -6,7 +6,7 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = D
 
-D_FILES =D.xm
+D_FILES = D.xm
 D_CFLAGS = -fobjc-arc
 D_FRAMEWORKS = UIKit Foundation
 
